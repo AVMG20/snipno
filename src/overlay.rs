@@ -2,6 +2,7 @@
 //! toolbar on top, and copies the selected region (annotations included) to the clipboard.
 
 use crate::{
+    adjust::{self, Grip},
     annotate::{self, Shape, Tool},
     hotkey, macos,
     snap::{self, Snap},
@@ -122,6 +123,8 @@ struct Overlay {
     /// `drawing` with its end pushed slightly ahead of the cursor, for display only.
     preview: Option<Shape>,
     selecting: Option<(Pos2, Pos2)>,
+    /// A selection kept open because ⌘ was held when it was made; copied when ⌘ is let go.
+    adjusting: Option<Adjusting>,
     opened: Instant,
     frame: u32,
     /// The cursor was on this display when the overlay opened.
@@ -133,6 +136,12 @@ struct Overlay {
     tool_keys: crate::config::ToolKeys,
     snapshot: Option<crate::snapshot::Snapshot>,
     hover: Hover,
+}
+
+struct Adjusting {
+    rect: Rect,
+    /// While dragging: what was grabbed, where the press was, and the selection at that moment.
+    grab: Option<(Grip, Pos2, Rect)>,
 }
 
 /// Smart selection state: what's highlighted under the cursor in Select mode.
@@ -256,6 +265,7 @@ impl Overlay {
             drawing: None,
             preview: None,
             selecting: None,
+            adjusting: None,
             opened: Instant::now(),
             frame: 0,
             cursor_here: cursor.is_some(),
@@ -328,13 +338,20 @@ impl Overlay {
             )
         });
         if esc {
-            self.close(ctx);
+            // First Esc drops a selection held open with ⌘, the next one closes the overlay.
+            if self.adjusting.take().is_none() {
+                self.close(ctx);
+            }
         } else if enter {
-            self.copy_and_close(ctx, screen, screen);
+            let area = self.adjusting.as_ref().map_or(screen, |a| a.rect);
+            self.copy_and_close(ctx, area, screen);
         } else if undo {
-            // Mid-drag, ⌘Z drops the selection or shape being dragged so you can start over;
-            // otherwise it removes the last finished drawing.
-            if self.selecting.take().is_none() && self.drawing.take().is_none() {
+            // Mid-drag or with a selection held open, ⌘Z drops that selection (or the shape being
+            // dragged) so you can start over; otherwise it removes the last finished drawing.
+            if self.selecting.take().is_none()
+                && self.drawing.take().is_none()
+                && self.adjusting.take().is_none()
+            {
                 self.shapes.pop();
             }
             self.preview = None;
@@ -345,7 +362,10 @@ impl Overlay {
 
     /// The area a click would capture: only in Select mode, while not dragging.
     fn highlight(&self) -> Option<Rect> {
-        (self.tool == Tool::Select && self.selecting.is_none() && self.drawing.is_none())
+        (self.tool == Tool::Select
+            && self.selecting.is_none()
+            && self.drawing.is_none()
+            && self.adjusting.is_none())
             .then(|| self.hover.highlight())
             .flatten()
     }
@@ -353,7 +373,7 @@ impl Overlay {
     fn handle_pointer(&mut self, ui: &egui::Ui, canvas: &egui::Response, screen: Rect) {
         // Every PointerMoved since the last frame, not just the latest position: macOS delivers
         // mouse samples faster than we repaint, and dropping them is what made strokes angular.
-        let (press_origin, shift, moves) = ui.input(|i| {
+        let (press_origin, shift, command, moves) = ui.input(|i| {
             let moves: Vec<Pos2> = i
                 .events
                 .iter()
@@ -362,32 +382,52 @@ impl Overlay {
                     _ => None,
                 })
                 .collect();
-            (i.pointer.press_origin(), i.modifiers.shift, moves)
+            (i.pointer.press_origin(), i.modifiers.shift, i.modifiers.command, moves)
         });
         if let Some(stats) = &mut self.debug {
             stats.moves += moves.len() as u32;
         }
         let pos = canvas.interact_pointer_pos();
 
-        // Click (no drag) in Select mode: take the highlighted area.
+        // Click (no drag) in Select mode: take the highlighted area, or with ⌘ held keep it open.
         if canvas.clicked()
             && let Some(area) = self.highlight()
         {
-            self.copy_and_close(ui.ctx(), area, screen);
+            if command {
+                self.adjusting = Some(Adjusting { rect: area, grab: None });
+            } else {
+                self.copy_and_close(ui.ctx(), area, screen);
+            }
             return;
         }
 
         if canvas.drag_started()
             && let Some(start) = press_origin.or(pos)
         {
-            match self.tool {
-                Tool::Select => self.selecting = Some((start, start)),
-                tool => self.drawing = Shape::start(tool, start, self.color, self.width),
+            // Pressing on a held-open selection moves or resizes it; anywhere else starts over.
+            let grip = match &self.adjusting {
+                Some(a) if self.tool == Tool::Select => Grip::at(a.rect, start),
+                _ => None,
+            };
+            match (grip, self.tool) {
+                (Some(grip), _) => {
+                    if let Some(a) = &mut self.adjusting {
+                        a.grab = Some((grip, start, a.rect));
+                    }
+                }
+                (None, Tool::Select) => {
+                    self.adjusting = None;
+                    self.selecting = Some((start, start));
+                }
+                (None, tool) => self.drawing = Shape::start(tool, start, self.color, self.width),
             }
         }
         if canvas.dragged()
             && let Some(p) = pos
         {
+            if let Some(Adjusting { rect, grab: Some((grip, from, start)) }) = &mut self.adjusting {
+                *rect = grip.apply(*start, p - *from, screen);
+            }
             if let Some((_, end)) = &mut self.selecting {
                 *end = p;
             }
@@ -400,10 +440,17 @@ impl Overlay {
         }
         if canvas.drag_stopped() {
             self.preview = None;
+            if let Some(a) = &mut self.adjusting {
+                a.grab = None;
+            }
             if let Some((a, b)) = self.selecting.take() {
                 let selection = Rect::from_two_pos(a, b).intersect(screen);
                 if selection.width() >= 3.0 && selection.height() >= 3.0 {
-                    self.copy_and_close(ui.ctx(), selection, screen);
+                    if command {
+                        self.adjusting = Some(Adjusting { rect: selection, grab: None });
+                    } else {
+                        self.copy_and_close(ui.ctx(), selection, screen);
+                    }
                 }
             }
             if let Some(shape) = self.drawing.take()
@@ -421,7 +468,8 @@ impl Overlay {
         // Dim everything except the area being selected (or the hover highlight).
         let dim = Color32::from_black_alpha(96);
         let hover = self.highlight();
-        match self.selecting.map(|(a, b)| Rect::from_two_pos(a, b)).or(hover) {
+        let held = self.adjusting.as_ref().map(|a| a.rect);
+        match self.selecting.map(|(a, b)| Rect::from_two_pos(a, b)).or(held).or(hover) {
             Some(sel) => {
                 for r in [
                     Rect::from_min_max(screen.min, pos2(screen.max.x, sel.min.y)),
@@ -456,6 +504,32 @@ impl Overlay {
             let scale = self.scale(screen);
             let label = format!("{} × {}", (sel.width() * scale).round(), (sel.height() * scale).round());
             toolbar::size_label(painter, sel, screen, label);
+        }
+
+        if let Some(sel) = held {
+            painter.rect_stroke(sel, 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Outside);
+            for c in adjust::handles(sel) {
+                let handle = Rect::from_center_size(c, egui::Vec2::splat(adjust::HANDLE_SIZE));
+                painter.rect_filled(handle, 2.0, Color32::WHITE);
+                painter.rect_stroke(handle, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+            }
+            let scale = self.scale(screen);
+            let label = format!("{} × {}", (sel.width() * scale).round(), (sel.height() * scale).round());
+            toolbar::size_label(painter, sel, screen, label);
+        }
+    }
+
+    /// Crosshair, or a move/resize cursor over a selection held open with ⌘.
+    fn cursor(&self, ctx: &egui::Context) -> CursorIcon {
+        let Some(a) = &self.adjusting else { return CursorIcon::Crosshair };
+        if let Some((grip, ..)) = a.grab {
+            return grip.cursor(true);
+        }
+        match ctx.input(|i| i.pointer.hover_pos()) {
+            Some(p) if self.tool == Tool::Select => {
+                Grip::at(a.rect, p).map_or(CursorIcon::Crosshair, |g| g.cursor(false))
+            }
+            _ => CursorIcon::Crosshair,
         }
     }
 
@@ -516,11 +590,26 @@ impl eframe::App for Overlay {
         self.hover.update(&ctx);
         let canvas = ui.interact(screen, ui.scope_id().with("canvas"), Sense::click_and_drag());
         self.handle_pointer(ui, &canvas, screen);
+        if self.closing {
+            return;
+        }
         if canvas.hovered() || canvas.dragged() {
-            ctx.set_cursor_icon(CursorIcon::Crosshair);
+            ctx.set_cursor_icon(self.cursor(&ctx));
+        }
+
+        // A selection held open with ⌘ is copied as soon as ⌘ is let go (and the mouse is up).
+        if let Some(Adjusting { rect, grab: None }) = self.adjusting
+            && !ctx.input(|i| i.modifiers.command || i.pointer.any_down())
+        {
+            self.copy_and_close(&ctx, rect, screen);
+            return;
         }
 
         self.paint(ui.painter(), screen);
+        if self.adjusting.is_some() {
+            toolbar::hint(&ctx, "Release ⌘ to copy  ·  drag to move or resize  ·", "⌘Z", 1.0);
+            return;
+        }
         if self.selecting.is_some() || self.drawing.is_some() {
             return; // keep the screen clear while dragging
         }

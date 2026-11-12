@@ -1,3 +1,4 @@
+mod adjust;
 mod annotate;
 mod config;
 mod daemon;

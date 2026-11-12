@@ -24,11 +24,12 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 | Click | copy the highlighted area |
 | Scroll while hovering | grow to the enclosing area (panel → window → screen) or shrink back |
 | Drag (Select tool) | copy a custom region |
+| hold `⌘` while releasing the mouse (or clicking a highlight) | keep the selection open: drag inside to move it, drag an edge or handle to resize, let go of `⌘` to copy |
 | `S` `P` `A` `R` `E` | Select, Pen, Arrow, Box, Circle (change them in Settings → Tool shortcuts) |
 | hold `⇧` | square box / perfect circle |
-| `⌘Z` | while dragging: drop the selection or shape and start over; otherwise undo the last drawing |
+| `⌘Z` | while dragging or holding a selection open: drop it and start over; otherwise undo the last drawing |
 | `↩` / **Full screen** | copy the whole screen |
-| `Esc` | cancel |
+| `Esc` | drop a selection held open, otherwise cancel |
 
 To change the capture hotkey or the tool keys, click the menu bar icon → **Settings…**. A new capture hotkey works as soon as you've recorded it. Any key combination is allowed, including Insert and a Windows keyboard's PrtSc (which reaches a Mac as F13). Config is stored in `~/Library/Application Support/snipno/config.json`.
 

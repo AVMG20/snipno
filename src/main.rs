@@ -11,11 +11,12 @@ mod snap;
 mod snapshot;
 mod theme;
 mod toolbar;
+mod upload;
 
 use std::process::ExitCode;
 
 const USAGE: &str =
-    "usage: snipno [daemon | capture [--monitor <id>] | settings | monitors | icon <out.png> [size] [--tray]]";
+    "usage: snipno [daemon | capture [--monitor <id>] [--upload] | upload <file.png> [--labels a,b] | settings | monitors | icon <out.png> [size] [--tray]]";
 
 /// `snipno monitors`: display ids for `capture --monitor`, with position and size in points.
 fn list_monitors() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,8 +41,15 @@ fn main() -> ExitCode {
         None | Some("daemon") => daemon::run(),
         Some("capture") => {
             let monitor = args.iter().position(|a| a == "--monitor").and_then(|i| args.get(i + 1)?.parse().ok());
-            overlay::run(monitor)
+            overlay::run(monitor, args.iter().any(|a| a == "--upload"))
         }
+        Some("upload") => match args.get(1) {
+            Some(file) => {
+                let labels = args.iter().position(|a| a == "--labels").and_then(|i| args.get(i + 1)).cloned();
+                upload::run(std::path::Path::new(file), labels)
+            }
+            None => Err(USAGE.into()),
+        },
         Some("settings") => settings::run(),
         Some("monitors") => list_monitors(),
         Some("icon") => icon::write_png(&args[1..]),

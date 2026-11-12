@@ -33,6 +33,28 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 
 To change the capture hotkey or the tool keys, click the menu bar icon → **Settings…**. A new capture hotkey works as soon as you've recorded it. Any key combination is allowed, including Insert and a Windows keyboard's PrtSc (which reaches a Mac as F13). Config is stored in `~/Library/Application Support/snipno/config.json`.
 
+## Upload and copy the link
+
+snipno can also upload a capture and put its link on the clipboard instead of the image. It works with most self-hosted image hosts (the ShareX "custom uploader" style). Set it up in **Settings → Upload**:
+
+- **Upload URL**: the endpoint. The PNG is POSTed as multipart form data in the `file` field.
+- **API token**: sent as `Authorization: Bearer <token>`.
+- **Labels**: comma-separated, sent as the `tags` field. You can also edit them in the overlay before each upload.
+- **Extra fields**: more form fields, `key=value&key=value`.
+- **Link**: how to build the link from the JSON response, with `{json:path}` placeholders (`{response}` is the raw body). Leave it empty to use the response's `url` or `link` field.
+
+Then record an **Upload shortcut**, or use **Screenshot & upload** in the menu bar menu. The overlay closes right away; a notification tells you when the link is copied or why the upload failed. The request is made by macOS's `curl`, with the token passed on stdin so it never appears in the process list. The token is stored in the config file in plain text.
+
+For an imgstore instance:
+
+| Field | Value |
+|---|---|
+| Upload URL | `https://img.example.com/api/images` |
+| Extra fields | `isPublic=true` |
+| Link | `https://img.example.com/i/{json:images[0].slug}` |
+
+`snipno upload <file.png> [--labels a,b]` uploads a file from the terminal with the same settings.
+
 ## How it's built
 
 One binary, three modes:

@@ -25,8 +25,9 @@ use xcap::{Monitor, image::RgbaImage};
 const HINT_SECS: f32 = 3.5;
 
 /// `monitor`: display id to cover (the daemon starts one overlay per display); `None` means the
-/// display under the cursor.
-pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
+/// display under the cursor. With `upload`, the selection is uploaded and its link copied
+/// instead of the image.
+pub fn run(monitor: Option<u32>, upload: bool) -> Result<(), Box<dyn Error>> {
     let monitor = match monitor {
         Some(id) => Monitor::all()?
             .into_iter()
@@ -94,7 +95,11 @@ pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
                 let _ = tx.send(Snap::new(&img, img.width() as f32 / w, screen, windows));
                 ctx.request_repaint();
             });
-            Ok(Box::new(Overlay::new(&cc.egui_ctx, shot, pos2(x, y), cursor, rx)))
+            let mut overlay = Overlay::new(&cc.egui_ctx, shot, pos2(x, y), cursor, rx);
+            if upload {
+                overlay.labels = Some(crate::config::load().upload.labels);
+            }
+            Ok(Box::new(overlay))
         }),
     )?;
     Ok(())
@@ -136,6 +141,8 @@ struct Overlay {
     tool_keys: crate::config::ToolKeys,
     snapshot: Option<crate::snapshot::Snapshot>,
     hover: Hover,
+    /// Upload mode: the labels to send, editable in the overlay. `None` copies the image.
+    labels: Option<String>,
 }
 
 struct Adjusting {
@@ -218,6 +225,31 @@ impl Hover {
     }
 }
 
+/// Save the capture as a temporary PNG and hand it to a detached `snipno upload`, so the overlays
+/// can close while it uploads. That process copies the link and deletes the file.
+fn start_upload(image: &RgbaImage, labels: &str) -> Result<(), Box<dyn Error>> {
+    use xcap::image::{
+        ExtendedColorType, ImageEncoder,
+        codecs::png::{CompressionType, FilterType, PngEncoder},
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+    let path = std::env::temp_dir().join(format!("snipno-{stamp}.png"));
+    let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    PngEncoder::new_with_quality(file, CompressionType::Fast, FilterType::Adaptive).write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        ExtendedColorType::Rgba8,
+    )?;
+    std::process::Command::new(std::env::current_exe()?)
+        .arg("upload")
+        .arg(&path)
+        .args(["--labels", labels])
+        .stdin(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 /// Even with vsync off, the screen shows a pointer sample ~2 frames late while the hardware
 /// cursor is instant, so straight shapes visibly trail it. Draw their live end where the cursor
 /// will be ~one frame from now. Display only: the real shape keeps the real point, so the
@@ -291,6 +323,7 @@ impl Overlay {
                 level: 0,
                 scroll: 0.0,
             },
+            labels: None,
         }
     }
 
@@ -301,6 +334,13 @@ impl Overlay {
 
     fn copy_and_close(&mut self, ctx: &egui::Context, selection: Rect, screen: Rect) {
         let image = annotate::render(&self.shot, &self.shapes, self.scale(screen), selection);
+        if let Some(labels) = &self.labels {
+            if let Err(e) = start_upload(&image, labels) {
+                eprintln!("snipno: upload failed: {e}");
+            }
+            self.close(ctx);
+            return;
+        }
         let (w, h) = image.dimensions();
         let result = arboard::Clipboard::new().and_then(|mut cb| {
             cb.set_image(arboard::ImageData {
@@ -321,6 +361,9 @@ impl Overlay {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context, screen: Rect) {
+        if ctx.egui_wants_keyboard_input() {
+            return; // typing labels: keys are text, not shortcuts
+        }
         let keys = &self.tool_keys;
         let (esc, undo, enter, tool) = ctx.input(|i| {
             // Tool shortcuts from the config (S/P/A/R/E unless changed in Settings).
@@ -635,7 +678,13 @@ impl eframe::App for Overlay {
 
         let age = self.opened.elapsed().as_secs_f32();
         let opacity = (1.0 - (age - HINT_SECS) / 0.4).clamp(0.0, 1.0);
+        if let Some(labels) = &mut self.labels {
+            toolbar::labels_field(&ctx, labels);
+        }
         let text = match self.tool {
+            Tool::Select if self.labels.is_some() => {
+                "Click to upload the highlight, drag for your own, scroll to resize  ·".to_string()
+            }
             Tool::Select => "Click to capture the highlight, drag for your own, scroll to resize  ·".to_string(),
             _ => format!(
                 "Draw, then press {} and drag to capture  ·",

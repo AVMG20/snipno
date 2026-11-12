@@ -1,4 +1,5 @@
-//! `snipno settings`: record the global capture hotkey and the overlay's tool shortcuts.
+//! `snipno settings`: record the global hotkeys and the overlay's tool shortcuts, and set up
+//! where "screenshot & upload" sends captures.
 //! Tells the daemon over stdout to pause the hotkey while recording and to reload after a save
 //! (see `daemon::MSG_*`).
 
@@ -12,7 +13,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("snipno")
-            .with_inner_size([460.0, 610.0])
+            .with_inner_size([460.0, 690.0])
             .with_resizable(false)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -48,6 +49,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             Ok(Box::new(Settings {
                 config: config::load(),
                 recording: None,
+                tab: Tab::Shortcuts,
                 status: None,
                 logo,
                 snapshot: crate::snapshot::Snapshot::from_env(),
@@ -61,12 +63,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
     Capture,
+    Upload,
     Tool(Tool),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Shortcuts,
+    Upload,
 }
 
 struct Settings {
     config: config::Config,
     recording: Option<Target>,
+    tab: Tab,
     status: Option<(String, bool)>,
     logo: TextureHandle,
     snapshot: Option<crate::snapshot::Snapshot>,
@@ -113,17 +123,43 @@ impl Settings {
         });
     }
 
-    fn set_hotkey(&mut self, s: String) {
-        if let Err(e) = hotkey::parse(&s) {
+    /// Record a global hotkey: the capture one, or the upload one (`""` removes that).
+    fn set_hotkey(&mut self, target: Target, s: String) {
+        if !s.is_empty()
+            && let Err(e) = hotkey::parse(&s)
+        {
             self.status = Some((format!("Can't use that shortcut: {e}"), false));
             tell_daemon(daemon::MSG_RESUME);
             return;
         }
-        self.config.hotkey = s;
+        let other = if target == Target::Upload { &self.config.hotkey } else { &self.config.upload.hotkey };
+        if !s.is_empty() && s.eq_ignore_ascii_case(other) {
+            let what = if target == Target::Upload { "capture" } else { "upload" };
+            self.status = Some((format!("{} is already your {what} shortcut.", hotkey::pretty(&s)), false));
+            tell_daemon(daemon::MSG_RESUME);
+            return;
+        }
+        let removed = s.is_empty();
+        match target {
+            Target::Upload => self.config.upload.hotkey = s,
+            _ => self.config.hotkey = s,
+        }
         self.status = Some(match config::save(&self.config) {
             Ok(()) => {
                 tell_daemon(daemon::MSG_RELOAD);
-                ("Saved. The new shortcut works right away.".into(), true)
+                let msg = if removed { "Shortcut removed." } else { "Saved. The new shortcut works right away." };
+                (msg.into(), true)
+            }
+            Err(e) => (format!("Could not save config: {e}"), false),
+        });
+    }
+
+    /// Save after editing an upload field; the daemon reloads to enable or disable the menu item.
+    fn save_upload(&mut self) {
+        self.status = Some(match config::save(&self.config) {
+            Ok(()) => {
+                tell_daemon(daemon::MSG_RELOAD);
+                ("Saved.".into(), true)
             }
             Err(e) => (format!("Could not save config: {e}"), false),
         });
@@ -149,10 +185,10 @@ impl Settings {
             }
             match target {
                 // The global hotkey is registered by physical key position.
-                Target::Capture => match hotkey::from_key_press(physical, mods) {
+                Target::Capture | Target::Upload => match hotkey::from_key_press(physical, mods) {
                     Some(s) => {
                         self.recording = None; // the reload below re-enables the hotkey
-                        self.set_hotkey(s);
+                        self.set_hotkey(target, s);
                         return;
                     }
                     None => {
@@ -187,7 +223,15 @@ impl Settings {
         });
     }
 
-    fn shortcut_card(&mut self, ui: &mut egui::Ui) {
+    fn shortcut_card(&mut self, ui: &mut egui::Ui, target: Target) {
+        let (title, desc, current) = match target {
+            Target::Upload => (
+                "Upload shortcut",
+                "Capture, upload, and copy the link.",
+                self.config.upload.hotkey.clone(),
+            ),
+            _ => ("Capture shortcut", "Press it anywhere to start a capture.", self.config.hotkey.clone()),
+        };
         egui::Frame::new()
             .fill(theme::SURFACE)
             .stroke(Stroke::new(1.0, theme::BORDER))
@@ -198,14 +242,16 @@ impl Settings {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 3.0;
-                        ui.label(RichText::new("Capture shortcut").size(13.5).color(theme::TEXT));
-                        ui.label(RichText::new("Press it anywhere to start a capture.").size(12.0).color(theme::MUTED));
+                        ui.label(RichText::new(title).size(13.5).color(theme::TEXT));
+                        ui.label(RichText::new(desc).size(12.0).color(theme::MUTED));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.recording == Some(Target::Capture) {
+                        if self.recording == Some(target) {
                             recording_pill(ui);
+                        } else if current.is_empty() {
+                            ui.label(RichText::new("None").size(12.5).color(theme::FAINT));
                         } else {
-                            chips(ui, &self.config.hotkey, 13.0);
+                            chips(ui, &current, 13.0);
                         }
                     });
                 });
@@ -216,7 +262,7 @@ impl Settings {
                 ui.add_space(12.0);
 
                 ui.horizontal(|ui| {
-                    if self.recording == Some(Target::Capture) {
+                    if self.recording == Some(target) {
                         if ui.add(ghost_button("Cancel")).clicked() {
                             self.stop_recording();
                             self.status = None;
@@ -224,14 +270,20 @@ impl Settings {
                         ui.label(RichText::new("Esc also cancels").size(12.0).color(theme::FAINT));
                     } else {
                         if ui.add(primary_button("Record new shortcut")).clicked() {
-                            self.start_recording(Target::Capture);
+                            self.start_recording(target);
                         }
-                        let is_default = self.config.hotkey == config::DEFAULT_HOTKEY;
-                        let reset = ui
-                            .add_enabled(!is_default, ghost_button("Reset"))
-                            .on_hover_text(format!("Back to {}", hotkey::pretty(config::DEFAULT_HOTKEY)));
-                        if reset.clicked() {
-                            self.set_hotkey(config::DEFAULT_HOTKEY.to_string());
+                        if target == Target::Upload {
+                            if ui.add_enabled(!current.is_empty(), ghost_button("Remove")).clicked() {
+                                self.set_hotkey(target, String::new());
+                            }
+                        } else {
+                            let is_default = current == config::DEFAULT_HOTKEY;
+                            let reset = ui
+                                .add_enabled(!is_default, ghost_button("Reset"))
+                                .on_hover_text(format!("Back to {}", hotkey::pretty(config::DEFAULT_HOTKEY)));
+                            if reset.clicked() {
+                                self.set_hotkey(target, config::DEFAULT_HOTKEY.to_string());
+                            }
                         }
                     }
                 });
@@ -292,6 +344,61 @@ impl Settings {
         });
     }
 
+    fn destination_card(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.label(RichText::new("Destination").size(13.5).color(theme::TEXT));
+            ui.label(
+                RichText::new("Sent as multipart form data, image in the file field.").size(12.0).color(theme::MUTED),
+            );
+            ui.add_space(6.0);
+            let up = &mut self.config.upload;
+            let mut changed = false;
+            changed |= field(ui, "Upload URL", "https://img.example.com/api/images", &mut up.url, false);
+            changed |= field(ui, "API token", "sent as Authorization: Bearer …", &mut up.token, true);
+            changed |= field(ui, "Labels", "comma, separated (sent as tags)", &mut up.labels, false);
+            changed |= field(ui, "Extra fields", "isPublic=true&key=value", &mut up.fields, false);
+            changed |= field(
+                ui,
+                "Link",
+                "…/i/{json:images[0].slug} (empty: the response's url)",
+                &mut up.link,
+                false,
+            );
+            if changed {
+                self.save_upload();
+            }
+        });
+    }
+
+    fn tabs(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(theme::SURFACE)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .corner_radius(CornerRadius::same(9))
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.columns(2, |cols| {
+                    for (col, (tab, name)) in cols.iter_mut().zip([(Tab::Shortcuts, "Shortcuts"), (Tab::Upload, "Upload")]) {
+                        let on = self.tab == tab;
+                        let button = egui::Button::new(
+                            RichText::new(name).size(12.5).color(if on { theme::TEXT } else { theme::MUTED }),
+                        )
+                        .fill(if on { theme::SURFACE_HI } else { Color32::TRANSPARENT })
+                        .stroke(if on { Stroke::new(1.0, theme::BORDER_HI) } else { Stroke::NONE })
+                        .corner_radius(CornerRadius::same(7))
+                        .min_size(vec2(col.available_width(), 26.0));
+                        if col.vertical_centered_justified(|ui| ui.add(button)).inner.clicked() && !on {
+                            self.stop_recording();
+                            self.status = None;
+                            self.tab = tab;
+                        }
+                    }
+                });
+            });
+    }
+
     fn status(&self, ui: &mut egui::Ui) {
         let Some((msg, ok)) = &self.status else { return };
         ui.horizontal(|ui| {
@@ -313,6 +420,22 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
             ui.set_width(ui.available_width());
             add(ui);
         });
+}
+
+/// A labelled single-line text field. Returns whether the text changed.
+fn field(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, password: bool) -> bool {
+    ui.add_space(6.0);
+    ui.label(RichText::new(label).size(12.0).color(theme::MUTED));
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(RichText::new(hint).color(theme::FAINT))
+            .password(password)
+            .desired_width(f32::INFINITY)
+            .font(FontId::proportional(13.0))
+            .background_color(theme::SURFACE_HI)
+            .margin(vec2(8.0, 5.0)),
+    )
+    .changed()
 }
 
 fn separator(ui: &mut egui::Ui) {
@@ -379,7 +502,9 @@ impl eframe::App for Settings {
         }
         if let Some(target) = self.recording {
             self.record(&ctx, target);
-        } else if ctx.input(|i| i.key_pressed(Key::Escape) || (i.modifiers.command && i.key_pressed(Key::W))) {
+        } else if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::W))
+            || (!ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::Escape)))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
@@ -387,10 +512,21 @@ impl eframe::App for Settings {
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(Margin { left: 24, right: 24, top: 40, bottom: 18 }))
             .show(ui, |ui| {
                 self.header(ui);
-                ui.add_space(18.0);
-                self.shortcut_card(ui);
+                ui.add_space(16.0);
+                self.tabs(ui);
                 ui.add_space(12.0);
-                self.tools_card(ui);
+                match self.tab {
+                    Tab::Shortcuts => {
+                        self.shortcut_card(ui, Target::Capture);
+                        ui.add_space(12.0);
+                        self.tools_card(ui);
+                    }
+                    Tab::Upload => {
+                        self.shortcut_card(ui, Target::Upload);
+                        ui.add_space(12.0);
+                        self.destination_card(ui);
+                    }
+                }
                 ui.add_space(10.0);
                 self.status(ui);
 

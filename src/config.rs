@@ -12,11 +12,13 @@ pub struct Config {
     pub hotkey: String,
     /// Keys that pick a tool inside the capture overlay.
     pub tool_keys: ToolKeys,
+    /// Where "capture and upload" sends screenshots.
+    pub upload: Upload,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { hotkey: DEFAULT_HOTKEY.to_string(), tool_keys: ToolKeys::default() }
+        Self { hotkey: DEFAULT_HOTKEY.to_string(), tool_keys: ToolKeys::default(), upload: Upload::default() }
     }
 }
 
@@ -63,6 +65,32 @@ impl ToolKeys {
             Tool::Rect => self.rect = key,
             Tool::Ellipse => self.ellipse = key,
         }
+    }
+}
+
+/// A ShareX-style custom uploader: the screenshot is POSTed as multipart form data (field
+/// `file`), and the link is read from the JSON response.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Upload {
+    /// Global hotkey for capture-and-upload; empty means none.
+    pub hotkey: String,
+    /// Endpoint, e.g. `https://img.example.com/api/images`. Empty disables uploading.
+    pub url: String,
+    /// Sent as `Authorization: Bearer <token>` when set.
+    pub token: String,
+    /// Comma-separated labels, sent as the `tags` form field. Editable per capture.
+    pub labels: String,
+    /// Extra form fields, `key=value&key=value` (e.g. `isPublic=true`).
+    pub fields: String,
+    /// Link template with `{json:path}` placeholders, e.g.
+    /// `https://img.example.com/i/{json:images[0].slug}`. Empty: use the response's `url`/`link`.
+    pub link: String,
+}
+
+impl Upload {
+    pub fn enabled(&self) -> bool {
+        !self.url.trim().is_empty()
     }
 }
 

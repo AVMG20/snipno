@@ -60,29 +60,32 @@ enum UserEvent {
 
 struct Hotkeys {
     manager: GlobalHotKeyManager,
+    /// Capture to the clipboard.
     active: Option<HotKey>,
+    /// Capture and upload; only registered once an upload URL is set.
+    upload: Option<HotKey>,
 }
 
 impl Hotkeys {
     fn pause(&mut self) {
-        if let Some(hk) = self.active.take() {
+        for hk in [self.active.take(), self.upload.take()].into_iter().flatten() {
             let _ = self.manager.unregister(hk);
         }
     }
 
-    /// (Re)register the hotkey from the config file. Returns the menu label to show.
-    fn apply_config(&mut self) -> String {
+    fn register(&mut self, shortcut: &str) -> Result<HotKey, String> {
+        let hk = hotkey::parse(shortcut).map_err(|e| format!("invalid hotkey {shortcut:?}: {e}"))?;
+        self.manager
+            .register(hk)
+            .map(|()| hk)
+            .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(shortcut)))
+    }
+
+    /// (Re)register both hotkeys from the config file and update their menu items.
+    fn apply_config(&mut self, capture_item: &MenuItem, upload_item: &MenuItem) {
         self.pause();
         let cfg = config::load();
-        let result = hotkey::parse(&cfg.hotkey)
-            .map_err(|e| format!("invalid hotkey {:?}: {e}", cfg.hotkey))
-            .and_then(|hk| {
-                self.manager
-                    .register(hk)
-                    .map(|()| hk)
-                    .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(&cfg.hotkey)))
-            });
-        match result {
+        capture_item.set_text(match self.register(&cfg.hotkey) {
             Ok(hk) => {
                 self.active = Some(hk);
                 format!("Take screenshot    {}", hotkey::pretty(&cfg.hotkey))
@@ -91,7 +94,26 @@ impl Hotkeys {
                 eprintln!("snipno: {e}");
                 "Take screenshot    (hotkey unavailable)".to_string()
             }
-        }
+        });
+
+        let up = &cfg.upload;
+        upload_item.set_enabled(up.enabled());
+        upload_item.set_text(if !up.enabled() {
+            "Screenshot & upload    (set up in Settings)".to_string()
+        } else if up.hotkey.is_empty() {
+            "Screenshot & upload".to_string()
+        } else {
+            match self.register(&up.hotkey) {
+                Ok(hk) => {
+                    self.upload = Some(hk);
+                    format!("Screenshot & upload    {}", hotkey::pretty(&up.hotkey))
+                }
+                Err(e) => {
+                    eprintln!("snipno: {e}");
+                    "Screenshot & upload    (hotkey unavailable)".to_string()
+                }
+            }
+        });
     }
 }
 
@@ -114,12 +136,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
-    let mut hotkeys = Hotkeys { manager: GlobalHotKeyManager::new()?, active: None };
-    let capture_item = MenuItem::new(hotkeys.apply_config(), true, None);
+    let mut hotkeys = Hotkeys { manager: GlobalHotKeyManager::new()?, active: None, upload: None };
+    let capture_item = MenuItem::new("Take screenshot", true, None);
+    let upload_item = MenuItem::new("Screenshot & upload", false, None);
+    hotkeys.apply_config(&capture_item, &upload_item);
     let settings_item = MenuItem::new("Settings…", true, None);
     let quit_item = MenuItem::new("Quit snipno", true, None);
     let menu = Menu::new();
-    menu.append_items(&[&capture_item, &settings_item, &PredefinedMenuItem::separator(), &quit_item])?;
+    menu.append_items(&[
+        &capture_item,
+        &upload_item,
+        &settings_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ])?;
 
     let mut tray: Option<TrayIcon> = None;
     let mut menu = Some(menu);
@@ -151,21 +181,28 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
 
             Event::UserEvent(UserEvent::HotKey(e)) => {
-                if e.state() == HotKeyState::Pressed && hotkeys.active.is_some_and(|hk| hk.id() == e.id()) {
-                    launch_capture(&capturing);
+                if e.state() != HotKeyState::Pressed {
+                    return;
+                }
+                if hotkeys.active.is_some_and(|hk| hk.id() == e.id()) {
+                    launch_capture(&capturing, false);
+                } else if hotkeys.upload.is_some_and(|hk| hk.id() == e.id()) {
+                    launch_capture(&capturing, true);
                 }
             }
 
             Event::UserEvent(UserEvent::Menu(e)) => {
                 if e.id == *capture_item.id() {
-                    launch_capture(&capturing);
+                    launch_capture(&capturing, false);
+                } else if e.id == *upload_item.id() {
+                    launch_capture(&capturing, true);
                 } else if e.id == *settings_item.id() {
                     // Already open (maybe lost behind other windows)? Replace it with a fresh one
                     // in front. Settings save immediately, so nothing is lost.
                     if let Some((_, mut old)) = settings.take() {
                         let _ = old.kill();
                         let _ = old.wait();
-                        capture_item.set_text(hotkeys.apply_config());
+                        hotkeys.apply_config(&capture_item, &upload_item);
                     }
                     generation += 1;
                     match open_settings(generation, proxy.clone()) {
@@ -188,13 +225,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 match msg {
                     SettingsMsg::Pause => hotkeys.pause(),
-                    SettingsMsg::Resume | SettingsMsg::Reload => capture_item.set_text(hotkeys.apply_config()),
+                    SettingsMsg::Resume | SettingsMsg::Reload => hotkeys.apply_config(&capture_item, &upload_item),
                     SettingsMsg::Closed => {
                         if let Some((_, mut child)) = settings.take() {
                             let _ = child.wait();
                         }
                         // Whatever happened in there, never leave the hotkey switched off.
-                        capture_item.set_text(hotkeys.apply_config());
+                        hotkeys.apply_config(&capture_item, &upload_item);
                     }
                 }
             }
@@ -226,7 +263,8 @@ fn open_settings(id: u32, proxy: EventLoopProxy<UserEvent>) -> std::io::Result<C
 /// Open an overlay on every display: one `snipno capture --monitor <id>` process each. The
 /// display under the cursor is started last so it ends up with keyboard focus. As soon as one
 /// overlay finishes (copied or cancelled, exit code 0) the others are closed.
-fn launch_capture(capturing: &Arc<AtomicBool>) {
+/// With `upload`, the overlays upload the selection and copy its link instead.
+fn launch_capture(capturing: &Arc<AtomicBool>, upload: bool) {
     // Ignore the hotkey while overlays are already up.
     if capturing.swap(true, Ordering::SeqCst) {
         return;
@@ -239,6 +277,9 @@ fn launch_capture(capturing: &Arc<AtomicBool>) {
             cmd.arg("capture");
             if let Some(id) = id {
                 cmd.args(["--monitor", &id.to_string()]);
+            }
+            if upload {
+                cmd.arg("--upload");
             }
             cmd.spawn().map_err(|e| eprintln!("snipno: could not start capture: {e}")).ok()
         })

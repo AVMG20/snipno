@@ -127,6 +127,36 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
 }
 
 /// Small pill under the toolbar that fades out after a few seconds.
+/// Upload mode: a pill under the toolbar with the labels that go along with the upload.
+pub fn labels_field(ctx: &egui::Context, labels: &mut String) {
+    egui::Area::new(Id::unique("snipno-labels"))
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_TOP, [0.0, TOP + BTN + 10.0 + 12.0 + 36.0])
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(CornerRadius::same(255))
+                .inner_margin(Margin { left: 12, right: 8, top: 4, bottom: 4 })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(egui::RichText::new("Upload").size(12.0).color(theme::ACCENT).strong());
+                        ui.label(egui::RichText::new("labels").size(12.0).color(theme::MUTED));
+                        ui.add(
+                            egui::TextEdit::singleline(labels)
+                                .hint_text("none")
+                                .desired_width(200.0)
+                                .font(FontId::proportional(12.5))
+                                .text_color(theme::TEXT)
+                                .background_color(theme::SURFACE_HI)
+                                .margin(vec2(8.0, 3.0)),
+                        );
+                    });
+                });
+        });
+}
+
 pub fn hint(ctx: &egui::Context, text: &str, key: &str, opacity: f32) {
     if opacity <= 0.0 {
         return;

@@ -39,6 +39,7 @@ snipno can also upload a capture and put its link on the clipboard instead of th
 
 - **Upload URL**: the endpoint. The PNG is POSTed as multipart form data in the `file` field.
 - **API token**: sent as `Authorization: Bearer <token>`.
+- **File name**: what the image is called on the server, `.png` added. `{date}`, `{time}` and `{timestamp}` (Unix seconds) are filled in, so `screenshot-{date}-{time}` (the default) gives `screenshot-2026-11-12-14-05-09.png`. Leave it empty for just the date and time.
 - **Labels**: comma-separated, sent as the `tags` field. You can also edit them in the overlay before each upload.
 - **Extra fields**: more form fields, `key=value&key=value`.
 - **Link**: how to build the link from the JSON response, with `{json:path}` placeholders (`{response}` is the raw body). Leave it empty to use the response's `url` or `link` field.

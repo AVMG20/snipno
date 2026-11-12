@@ -37,6 +37,24 @@ pub fn run(file: &Path, labels: Option<String>) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// The name the image is uploaded as: the template with `{date}` (2026-11-12), `{time}`
+/// (14-05-09) and `{timestamp}` (Unix seconds) filled in, made safe for a file name, plus `.png`.
+pub fn file_name(template: &str, now: chrono::DateTime<chrono::Local>) -> String {
+    let template = template.trim();
+    let template = if template.is_empty() { "{date}-{time}" } else { template };
+    let name = template
+        .replace("{date}", &now.format("%Y-%m-%d").to_string())
+        .replace("{time}", &now.format("%H-%M-%S").to_string())
+        .replace("{timestamp}", &now.timestamp().to_string());
+    // `/` and `:` mean folders to some servers; quotes and `;` would break the form header.
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() || "/\\:\";".contains(c) { '-' } else { c })
+        .collect();
+    let name = name.trim().trim_end_matches(".png").trim();
+    format!("{}.png", if name.is_empty() { "screenshot" } else { name })
+}
+
 fn send(cfg: &Upload, file: &Path, labels: &str) -> Result<String, String> {
     if !cfg.enabled() {
         return Err("no upload URL set (menu bar icon → Settings → Upload)".into());
@@ -52,7 +70,7 @@ fn send(cfg: &Upload, file: &Path, labels: &str) -> Result<String, String> {
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(curl_config(cfg, file, labels).as_bytes())
+        .write_all(curl_config(cfg, file, labels, &file_name(&cfg.name, chrono::Local::now())).as_bytes())
         .map_err(|e| format!("could not run curl: {e}"))?;
     let out = child.wait_with_output().map_err(|e| format!("curl failed: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout);
@@ -65,7 +83,7 @@ fn send(cfg: &Upload, file: &Path, labels: &str) -> Result<String, String> {
 }
 
 /// curl options, one per line, in `--config` syntax.
-pub fn curl_config(cfg: &Upload, file: &Path, labels: &str) -> String {
+pub fn curl_config(cfg: &Upload, file: &Path, labels: &str, name: &str) -> String {
     let mut lines = vec![format!("url = {}", quote(cfg.url.trim()))];
     if !cfg.token.trim().is_empty() {
         lines.push(format!("header = {}", quote(&format!("Authorization: Bearer {}", cfg.token.trim()))));
@@ -78,7 +96,10 @@ pub fn curl_config(cfg: &Upload, file: &Path, labels: &str) -> String {
     if !labels.is_empty() {
         lines.push(format!("form-string = {}", quote(&format!("tags={labels}"))));
     }
-    lines.push(format!("form = {}", quote(&format!("file=@\"{}\";type=image/png", file.display()))));
+    lines.push(format!(
+        "form = {}",
+        quote(&format!("file=@\"{}\";filename=\"{name}\";type=image/png", file.display()))
+    ));
     lines.join("\n") + "\n"
 }
 
@@ -217,26 +238,44 @@ mod tests {
             labels: "snipno".into(),
             fields: "isPublic=true".into(),
             link: "https://img.example.com/i/{json:images[0].slug}".into(),
+            name: "shot".into(),
         }
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
+        chrono::Local.from_local_datetime(&naive).unwrap()
+    }
+
+    #[test]
+    fn file_name_fills_in_the_date_and_time() {
+        let now = at("2026-11-12 14:05:09");
+        assert_eq!(file_name("screenshot-{date}-{time}", now), "screenshot-2026-11-12-14-05-09.png");
+        assert_eq!(file_name("{timestamp}", now), format!("{}.png", now.timestamp()));
+        assert_eq!(file_name("screenshot", now), "screenshot.png");
+        assert_eq!(file_name("  ", now), "2026-11-12-14-05-09.png");
+        assert_eq!(file_name("bug.png", now), "bug.png");
+        assert_eq!(file_name("a/b: \"c\";d", now), "a-b- -c--d.png");
     }
 
     #[test]
     fn curl_config_carries_url_token_fields_labels_and_file() {
-        let conf = curl_config(&imgstore(), Path::new("/tmp/snipno-1.png"), " ui , bug ,");
+        let conf = curl_config(&imgstore(), Path::new("/tmp/snipno-1.png"), " ui , bug ,", "shot.png");
         assert_eq!(
             conf,
             "url = \"https://img.example.com/api/images\"\n\
              header = \"Authorization: Bearer imgs_secret\"\n\
              form-string = \"isPublic=true\"\n\
              form-string = \"tags=ui,bug\"\n\
-             form = \"file=@\\\"/tmp/snipno-1.png\\\";type=image/png\"\n"
+             form = \"file=@\\\"/tmp/snipno-1.png\\\";filename=\\\"shot.png\\\";type=image/png\"\n"
         );
     }
 
     #[test]
     fn curl_config_skips_empty_token_and_labels_and_escapes_quotes() {
         let cfg = Upload { url: "https://x.test/up".into(), fields: "note=say \"hi\"\\".into(), ..Upload::default() };
-        let conf = curl_config(&cfg, Path::new("/tmp/a.png"), "  ");
+        let conf = curl_config(&cfg, Path::new("/tmp/a.png"), "  ", "a.png");
         assert!(!conf.contains("header"));
         assert!(!conf.contains("tags="));
         assert!(conf.contains(r#"form-string = "note=say \"hi\"\\""#));

@@ -13,7 +13,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("snipno")
-            .with_inner_size([460.0, 690.0])
+            .with_inner_size([460.0, 744.0])
             .with_resizable(false)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -356,6 +356,7 @@ impl Settings {
             let mut changed = false;
             changed |= field(ui, "Upload URL", "https://img.example.com/api/images", &mut up.url, false);
             changed |= field(ui, "API token", "sent as Authorization: Bearer …", &mut up.token, true);
+            changed |= field(ui, "File name", "{date}-{time}  ·  also {timestamp}", &mut up.name, false);
             changed |= field(ui, "Labels", "comma, separated (sent as tags)", &mut up.labels, false);
             changed |= field(ui, "Extra fields", "isPublic=true&key=value", &mut up.fields, false);
             changed |= field(

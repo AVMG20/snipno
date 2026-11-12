@@ -8,6 +8,7 @@ repository = "https://github.com/AVMG20/snipno"
 
 [dependencies]
 arboard = "3.7"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "7"
 eframe = "0.37"
 global-hotkey = "0.10"

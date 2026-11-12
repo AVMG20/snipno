@@ -70,7 +70,7 @@ impl ToolKeys {
 
 /// A ShareX-style custom uploader: the screenshot is POSTed as multipart form data (field
 /// `file`), and the link is read from the JSON response.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Upload {
     /// Global hotkey for capture-and-upload; empty means none.
@@ -86,6 +86,25 @@ pub struct Upload {
     /// Link template with `{json:path}` placeholders, e.g.
     /// `https://img.example.com/i/{json:images[0].slug}`. Empty: use the response's `url`/`link`.
     pub link: String,
+    /// File name the image is uploaded as, `.png` added; `{date}`, `{time}` and `{timestamp}`
+    /// are filled in. Empty means `{date}-{time}`.
+    pub name: String,
+}
+
+pub const DEFAULT_UPLOAD_NAME: &str = "screenshot-{date}-{time}";
+
+impl Default for Upload {
+    fn default() -> Self {
+        Self {
+            hotkey: String::new(),
+            url: String::new(),
+            token: String::new(),
+            labels: String::new(),
+            fields: String::new(),
+            link: String::new(),
+            name: DEFAULT_UPLOAD_NAME.into(),
+        }
+    }
 }
 
 impl Upload {

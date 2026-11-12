@@ -23,9 +23,11 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 | Hover (Select tool) | highlights the window or UI panel under the cursor |
 | Click | copy the highlighted area |
 | Scroll while hovering | grow to the enclosing area (panel → window → screen) or shrink back |
-| Drag (Select tool) | copy a custom region |
+| Drag (Select tool) | copy a custom region; a magnifier shows the exact pixels under the cursor |
 | hold `⌘` while releasing the mouse (or clicking a highlight) | keep the selection open: drag inside to move it, drag an edge or handle to resize, let go of `⌘` to copy |
-| `S` `P` `A` `R` `E` | Select, Pen, Arrow, Box, Circle (change them in Settings → Tool shortcuts) |
+| `S` `P` `A` `R` `E` `N` `B` | Select, Pen, Arrow, Box, Circle, Numbered marker, Pixelate (change them in Settings → Tool shortcuts) |
+| Numbered marker | click to drop ①, ②, ③…; drag to place one precisely. Undo removes the last one, so the next number follows on |
+| Pixelate | drag over passwords, emails or names to hide them behind big blocks |
 | hold `⇧` | square box / perfect circle |
 | `⌘Z` | while dragging or holding a selection open: drop it and start over; otherwise undo the last drawing |
 | `↩` / **Full screen** | copy the whole screen |
@@ -44,7 +46,7 @@ snipno can also upload a capture and put its link on the clipboard instead of th
 - **Extra fields**: more form fields, `key=value&key=value`.
 - **Link**: how to build the link from the JSON response, with `{json:path}` placeholders (`{response}` is the raw body). Leave it empty to use the response's `url` or `link` field.
 
-Then record an **Upload shortcut**, or use **Screenshot & upload** in the menu bar menu. The overlay closes right away; a notification tells you when the link is copied or why the upload failed. The request is made by macOS's `curl`, with the token passed on stdin so it never appears in the process list. The token is stored in the config file in plain text.
+Then record an **Upload shortcut**, or use **Screenshot & upload** in the menu bar menu. The overlay closes right away; a notification tells you when the link is copied or why the upload failed. The last five links stay under **Copy recent link** in the menu bar menu (saved in `history.json` next to the config). The request is made by macOS's `curl`, with the token passed on stdin so it never appears in the process list. The token is stored in the config file in plain text.
 
 For an imgstore instance:
 

@@ -13,7 +13,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("snipno")
-            .with_inner_size([460.0, 744.0])
+            .with_inner_size([460.0, 820.0])
             .with_resizable(false)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -331,7 +331,7 @@ impl Settings {
             ui.add_space(12.0);
             let defaults = config::ToolKeys::default();
             if ui
-                .add_enabled(self.config.tool_keys != defaults, ghost_button("Reset to S P A R E"))
+                .add_enabled(self.config.tool_keys != defaults, ghost_button("Reset to defaults"))
                 .clicked()
             {
                 self.stop_recording();

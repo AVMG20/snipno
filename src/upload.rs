@@ -15,7 +15,7 @@ use std::{
     error::Error,
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -26,6 +26,9 @@ pub fn run(file: &Path, labels: Option<String>) -> Result<(), Box<dyn Error>> {
     let _ = fs::remove_file(file);
     match result {
         Ok(link) => {
+            if let Err(e) = remember(&link) {
+                eprintln!("snipno: could not save upload history: {e}");
+            }
             arboard::Clipboard::new()?.set_text(link.clone())?;
             notify("Link copied", &link);
             Ok(())
@@ -35,6 +38,43 @@ pub fn run(file: &Path, labels: Option<String>) -> Result<(), Box<dyn Error>> {
             Err(e.into())
         }
     }
+}
+
+/// How many links the menu bar menu keeps under "Copy recent link".
+pub const HISTORY_LEN: usize = 5;
+
+/// Recent links, newest first, next to the config file.
+pub fn history_path() -> PathBuf {
+    config::path().with_file_name("history.json")
+}
+
+pub fn history() -> Vec<String> {
+    let mut links: Vec<String> = fs::read_to_string(history_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    links.truncate(HISTORY_LEN);
+    links
+}
+
+/// `links` with `link` moved (or added) to the front, at most [`HISTORY_LEN`] long.
+pub fn with_link(mut links: Vec<String>, link: &str) -> Vec<String> {
+    links.retain(|l| l != link);
+    links.insert(0, link.to_string());
+    links.truncate(HISTORY_LEN);
+    links
+}
+
+fn remember(link: &str) -> std::io::Result<()> {
+    let path = history_path();
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(&with_link(history(), link)).map_err(std::io::Error::other)?;
+    // Write then rename, so the daemon never reads a half-written file.
+    let tmp = path.with_file_name(format!("history.{}.tmp", std::process::id()));
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, &path)
 }
 
 /// The name the image is uploaded as: the template with `{date}` (2026-11-12), `{time}`
@@ -246,6 +286,16 @@ mod tests {
         use chrono::TimeZone;
         let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
         chrono::Local.from_local_datetime(&naive).unwrap()
+    }
+
+    #[test]
+    fn history_keeps_the_newest_five_without_duplicates() {
+        let links: Vec<String> = (1..=5).map(|i| format!("https://x/{i}")).collect();
+        let out = with_link(links.clone(), "https://x/3");
+        assert_eq!(out, ["https://x/3", "https://x/1", "https://x/2", "https://x/4", "https://x/5"]);
+        let out = with_link(links, "https://x/new");
+        assert_eq!(out.len(), HISTORY_LEN);
+        assert_eq!((out[0].as_str(), out[4].as_str()), ("https://x/new", "https://x/4"));
     }
 
     #[test]

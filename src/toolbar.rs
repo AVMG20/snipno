@@ -19,15 +19,18 @@ pub const COLORS: [(Color32, &str); 6] = [
 pub const WIDTHS: [(f32, &str); 3] = [(2.5, "Thin"), (5.0, "Medium"), (9.0, "Thick")];
 
 /// Toolbar order. Their keyboard shortcuts come from the config (`config::ToolKeys`).
-const TOOLS: [(Tool, Icon, &str); 5] = [
+const TOOLS: [(Tool, Icon, &str); 7] = [
     (Tool::Select, Icon::Select, "Select area"),
     (Tool::Pen, Icon::Pen, "Pen"),
     (Tool::Arrow, Icon::Arrow, "Arrow"),
     (Tool::Rect, Icon::Rect, "Rectangle  ·  ⇧ for square"),
     (Tool::Ellipse, Icon::Ellipse, "Ellipse  ·  ⇧ for circle"),
+    (Tool::Number, Icon::Number, "Numbered marker  ·  click to place 1, 2, 3…"),
+    (Tool::Pixelate, Icon::Pixelate, "Pixelate  ·  hide passwords, emails, names"),
 ];
 
-pub const TOOL_ORDER: [Tool; 5] = [TOOLS[0].0, TOOLS[1].0, TOOLS[2].0, TOOLS[3].0, TOOLS[4].0];
+pub const TOOL_ORDER: [Tool; 7] =
+    [TOOLS[0].0, TOOLS[1].0, TOOLS[2].0, TOOLS[3].0, TOOLS[4].0, TOOLS[5].0, TOOLS[6].0];
 
 /// Display name per tool, for the settings window.
 pub fn tool_name(tool: Tool) -> &'static str {
@@ -37,6 +40,8 @@ pub fn tool_name(tool: Tool) -> &'static str {
         Tool::Arrow => "Arrow",
         Tool::Rect => "Rectangle",
         Tool::Ellipse => "Ellipse",
+        Tool::Pixelate => "Pixelate",
+        Tool::Number => "Numbered marker",
     }
 }
 
@@ -64,6 +69,8 @@ enum Icon {
     Arrow,
     Rect,
     Ellipse,
+    Number,
+    Pixelate,
     Undo,
     Screen,
     Close,
@@ -96,7 +103,7 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
                         for (color, name) in COLORS {
                             if swatch(ui, color, *st.color == color).on_hover_text(name).clicked() {
                                 *st.color = color;
-                                if *st.tool == Tool::Select {
+                                if matches!(*st.tool, Tool::Select | Tool::Pixelate) {
                                     *st.tool = Tool::Pen;
                                 }
                             }
@@ -290,6 +297,19 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
         }
         Icon::Ellipse => {
             p.circle_stroke(r.center(), 6.8, s);
+        }
+        Icon::Number => {
+            p.circle_stroke(r.center(), 6.8, s);
+            line(&[at(6.3, 6.0), at(8.6, 4.4), at(8.6, 11.6)]);
+        }
+        Icon::Pixelate => {
+            // A 3×3 checkerboard of rounded squares.
+            let cell = 14.0 / 3.0;
+            for (i, j) in [(0, 0), (2, 0), (1, 1), (0, 2), (2, 2)] {
+                let min = at(1.0 + i as f32 * cell, 1.0 + j as f32 * cell);
+                p.rect_filled(Rect::from_min_size(min, Vec2::splat(cell)).shrink(0.4), 1.0, c);
+            }
+            p.rect_stroke(r.shrink(1.0), 2.0, Stroke::new(1.0, c.gamma_multiply(0.6)), egui::StrokeKind::Middle);
         }
         Icon::Undo => {
             // Arrow going left at the top, curving round the right and back along the bottom.

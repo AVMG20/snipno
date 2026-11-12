@@ -6,7 +6,7 @@
 //! the hotkey is only paused while a new one is actually being recorded and a saved hotkey takes
 //! effect immediately — not when the window closes.
 
-use crate::{config, hotkey, icon};
+use crate::{config, hotkey, icon, upload};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use std::{
     error::Error,
@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 use tao::{
     event::{Event, StartCause},
@@ -24,8 +24,11 @@ use tao::{
 };
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
 };
+
+/// How often the daemon checks whether an upload added a link to the history.
+const HISTORY_POLL: Duration = Duration::from_secs(2);
 
 /// Lines the settings process prints to stdout.
 pub const MSG_PAUSE: &str = "snipno:pause-hotkey";
@@ -117,6 +120,63 @@ impl Hotkeys {
     }
 }
 
+/// "Copy recent link" submenu: the last few uploaded links, click one to copy it again. The
+/// upload process writes the history file; the daemon picks up changes by its modified time.
+struct Recent {
+    menu: Submenu,
+    items: Vec<(MenuItem, String)>,
+    seen: Option<SystemTime>,
+}
+
+impl Recent {
+    fn new() -> Self {
+        let mut recent = Self { menu: Submenu::new("Copy recent link", false), items: Vec::new(), seen: None };
+        recent.refresh();
+        recent
+    }
+
+    fn refresh(&mut self) {
+        let modified = std::fs::metadata(upload::history_path()).and_then(|m| m.modified()).ok();
+        if modified == self.seen {
+            return;
+        }
+        self.seen = modified;
+        for (item, _) in self.items.drain(..) {
+            let _ = self.menu.remove(&item);
+        }
+        for link in upload::history() {
+            let item = MenuItem::new(menu_label(&link), true, None);
+            if self.menu.append(&item).is_ok() {
+                self.items.push((item, link));
+            }
+        }
+        self.menu.set_enabled(!self.items.is_empty());
+    }
+
+    /// Copy the link behind a clicked menu item; false if the item isn't one of ours.
+    fn copy(&self, id: &tray_icon::menu::MenuId) -> bool {
+        let Some((_, link)) = self.items.iter().find(|(item, _)| item.id() == id) else { return false };
+        if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(link.clone())) {
+            eprintln!("snipno: copying the link failed: {e}");
+        }
+        true
+    }
+}
+
+/// A link as a menu item: without the scheme, long ones cut in the middle so the end (usually
+/// the image's id) stays visible.
+fn menu_label(link: &str) -> String {
+    const MAX: usize = 48;
+    let s = link.trim_start_matches("https://").trim_start_matches("http://");
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= MAX {
+        return s.to_string();
+    }
+    let head: String = chars[..MAX / 2].iter().collect();
+    let tail: String = chars[chars.len() - (MAX / 2 - 1)..].iter().collect();
+    format!("{head}…{tail}")
+}
+
 pub fn run() -> Result<(), Box<dyn Error>> {
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -140,12 +200,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let capture_item = MenuItem::new("Take screenshot", true, None);
     let upload_item = MenuItem::new("Screenshot & upload", false, None);
     hotkeys.apply_config(&capture_item, &upload_item);
+    let mut recent = Recent::new();
     let settings_item = MenuItem::new("Settings…", true, None);
     let quit_item = MenuItem::new("Quit snipno", true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &capture_item,
         &upload_item,
+        &recent.menu,
         &settings_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
@@ -159,8 +221,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        // Wake up now and then to pick up links added by finished uploads.
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + HISTORY_POLL);
         match event {
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => recent.refresh(),
+
             // macOS: the status item must be created once the event loop is running.
             Event::NewEvents(StartCause::Init) => {
                 let tray_px = icon::tray_icon(44);
@@ -192,7 +257,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
 
             Event::UserEvent(UserEvent::Menu(e)) => {
-                if e.id == *capture_item.id() {
+                if recent.copy(&e.id) {
+                    // Copied a recent link.
+                } else if e.id == *capture_item.id() {
                     launch_capture(&capturing, false);
                 } else if e.id == *upload_item.id() {
                     launch_capture(&capturing, true);
@@ -340,5 +407,14 @@ mod tests {
         assert_eq!(SettingsMsg::parse(MSG_RESUME), Some(SettingsMsg::Resume));
         assert_eq!(SettingsMsg::parse(MSG_RELOAD), Some(SettingsMsg::Reload));
         assert_eq!(SettingsMsg::parse("snipno: snapshot saved"), None);
+    }
+
+    #[test]
+    fn menu_labels_drop_the_scheme_and_keep_the_end_of_long_links() {
+        assert_eq!(menu_label("https://img.example.com/i/abc"), "img.example.com/i/abc");
+        let long = format!("https://img.example.com/{}/xyz123", "a".repeat(60));
+        let label = menu_label(&long);
+        assert_eq!(label.chars().count(), 48);
+        assert!(label.starts_with("img.example.com/") && label.ends_with("/xyz123"), "{label}");
     }
 }

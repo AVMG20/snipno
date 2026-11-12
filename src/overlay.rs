@@ -3,15 +3,15 @@
 
 use crate::{
     adjust::{self, Grip},
-    annotate::{self, Shape, Tool},
+    annotate::{self, Kind, Mosaic, Shape, Tool},
     hotkey, macos,
     snap::{self, Snap},
     theme,
     toolbar::{self, Action},
 };
 use eframe::egui::{
-    self, Color32, CursorIcon, Event, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, ViewportCommand, pos2,
+    self, Color32, CursorIcon, Event, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureFilter,
+    TextureHandle, TextureOptions, ViewportCommand, pos2, vec2,
 };
 use std::{
     borrow::Cow,
@@ -143,6 +143,8 @@ struct Overlay {
     hover: Hover,
     /// Upload mode: the labels to send, editable in the overlay. `None` copies the image.
     labels: Option<String>,
+    /// Block-averaged screenshot for pixelate boxes, with its texture; made on first use.
+    mosaic: Option<(Mosaic, TextureHandle)>,
 }
 
 struct Adjusting {
@@ -282,7 +284,8 @@ fn predicted_preview(shape: &Shape, p: Pos2, velocity: egui::Vec2, square: bool)
     const LEAD_SECS: f32 = 0.016;
     const MAX_LEAD_PT: f32 = 30.0;
     const MIN_SPEED: f32 = 60.0; // pt/s; slower than this, prediction only adds jitter
-    if matches!(shape.kind, annotate::Kind::Pen(_)) || velocity.length() < MIN_SPEED {
+    // A marker follows the cursor exactly: leading it would make it jump back on release.
+    if matches!(shape.kind, Kind::Pen(_) | Kind::Number(..)) || velocity.length() < MIN_SPEED {
         return None;
     }
     let lead = velocity * LEAD_SECS;
@@ -309,7 +312,9 @@ impl Overlay {
     ) -> Self {
         let size = [shot.width() as usize, shot.height() as usize];
         let image = egui::ColorImage::from_rgba_unmultiplied(size, shot.as_raw());
-        let texture = ctx.load_texture("screenshot", image, TextureOptions::LINEAR);
+        // Nearest when magnified, so the loupe shows crisp pixels; shown 1:1 otherwise.
+        let options = TextureOptions { magnification: TextureFilter::Nearest, ..TextureOptions::LINEAR };
+        let texture = ctx.load_texture("screenshot", image, options);
         Self {
             shot,
             texture,
@@ -348,7 +353,24 @@ impl Overlay {
                 scroll: 0.0,
             },
             labels: None,
+            mosaic: None,
         }
+    }
+
+    fn ensure_mosaic(&mut self, ctx: &egui::Context, screen: Rect) {
+        if self.mosaic.is_some() {
+            return;
+        }
+        let mosaic = Mosaic::new(&self.shot, self.scale(screen));
+        let size = [mosaic.small.width() as usize, mosaic.small.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, mosaic.small.as_raw());
+        let texture = ctx.load_texture("mosaic", image, TextureOptions::NEAREST);
+        self.mosaic = Some((mosaic, texture));
+    }
+
+    /// What the next numbered marker shows: one more than the markers placed so far.
+    fn next_number(&self) -> u32 {
+        self.shapes.iter().filter(|s| matches!(s.kind, Kind::Number(..))).count() as u32 + 1
     }
 
     /// Image pixels per window point (2.0 on Retina).
@@ -357,7 +379,8 @@ impl Overlay {
     }
 
     fn copy_and_close(&mut self, ctx: &egui::Context, selection: Rect, screen: Rect) {
-        let image = annotate::render(&self.shot, &self.shapes, self.scale(screen), selection);
+        let mosaic = self.mosaic.as_ref().map(|(m, _)| m);
+        let image = annotate::render(&self.shot, &self.shapes, self.scale(screen), selection, mosaic);
         if let Some(labels) = &self.labels {
             if let Err(e) = start_upload(&image, labels) {
                 eprintln!("snipno: upload failed: {e}");
@@ -467,10 +490,22 @@ impl Overlay {
             }
             return;
         }
+        // Click with the marker tool: drop the next number there.
+        if canvas.clicked()
+            && self.tool == Tool::Number
+            && let Some(p) = pos
+            && let Some(shape) = Shape::start(Tool::Number, p, self.color, self.width, self.next_number())
+        {
+            self.shapes.push(shape);
+            return;
+        }
 
         if canvas.drag_started()
             && let Some(start) = press_origin.or(pos)
         {
+            if self.tool == Tool::Pixelate {
+                self.ensure_mosaic(ui.ctx(), screen);
+            }
             // Pressing on a held-open selection moves or resizes it; anywhere else starts over.
             let grip = match &self.adjusting {
                 Some(a) if self.tool == Tool::Select => Grip::at(a.rect, start),
@@ -486,7 +521,9 @@ impl Overlay {
                     self.adjusting = None;
                     self.selecting = Some((start, start));
                 }
-                (None, tool) => self.drawing = Shape::start(tool, start, self.color, self.width),
+                (None, tool) => {
+                    self.drawing = Shape::start(tool, start, self.color, self.width, self.next_number())
+                }
             }
         }
         if canvas.dragged()
@@ -528,7 +565,7 @@ impl Overlay {
         }
     }
 
-    fn paint(&self, painter: &egui::Painter, screen: Rect) {
+    fn paint(&self, painter: &egui::Painter, screen: Rect, pointer: Option<Pos2>) {
         let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
         painter.image(self.texture.id(), screen, uv, Color32::WHITE);
 
@@ -552,7 +589,18 @@ impl Overlay {
             }
         }
 
-        for shape in self.shapes.iter().chain(self.preview.as_ref().or(self.drawing.as_ref())) {
+        // Pixelate boxes first so drawings on top stay sharp, the same order as the copy.
+        let shapes = || self.shapes.iter().chain(self.preview.as_ref().or(self.drawing.as_ref()));
+        if let Some((mosaic, texture)) = &self.mosaic {
+            let scale = self.scale(screen);
+            for shape in shapes() {
+                if let Kind::Pixelate(a, b) = shape.kind {
+                    let r = Rect::from_two_pos(a, b);
+                    painter.image(texture.id(), r, mosaic.uv(r, scale), Color32::WHITE);
+                }
+            }
+        }
+        for shape in shapes().filter(|s| !s.is_pixelate()) {
             shape.paint(painter);
         }
 
@@ -583,6 +631,68 @@ impl Overlay {
             let label = format!("{} × {}", (sel.width() * scale).round(), (sel.height() * scale).round());
             toolbar::size_label(painter, sel, screen, label);
         }
+
+        // Magnifier while dragging out or resizing a selection, for pixel-exact edges.
+        let resizing =
+            self.adjusting.as_ref().is_some_and(|a| a.grab.is_some_and(|(grip, ..)| grip != Grip::MOVE));
+        if (self.selecting.is_some() || resizing)
+            && let Some(p) = pointer
+        {
+            self.paint_loupe(painter, screen, p);
+        }
+    }
+
+    /// Zoomed view of the screenshot pixels around `p`, with the pixel under it outlined.
+    fn paint_loupe(&self, painter: &egui::Painter, screen: Rect, p: Pos2) {
+        const CELLS: i32 = 15; // odd, so one pixel sits in the middle
+        const CELL: f32 = 8.0; // points per screenshot pixel
+        const OFFSET: f32 = 24.0;
+        let (iw, ih) = (self.shot.width() as i32, self.shot.height() as i32);
+        if iw < CELLS || ih < CELLS {
+            return;
+        }
+        let scale = self.scale(screen);
+        let px = ((p.x * scale).floor() as i32).clamp(0, iw - 1);
+        let py = ((p.y * scale).floor() as i32).clamp(0, ih - 1);
+        // The window of pixels shown, kept inside the image at the edges.
+        let x0 = (px - CELLS / 2).clamp(0, iw - CELLS);
+        let y0 = (py - CELLS / 2).clamp(0, ih - CELLS);
+
+        let size = CELLS as f32 * CELL;
+        let label_h = 22.0;
+        // Below-right of the cursor, flipped to the other side near the screen edges.
+        let mut min = p + vec2(OFFSET, OFFSET);
+        if min.x + size > screen.max.x {
+            min.x = p.x - OFFSET - size;
+        }
+        if min.y + size + label_h > screen.max.y {
+            min.y = p.y - OFFSET - size - label_h;
+        }
+        let rect = Rect::from_min_size(min, egui::Vec2::splat(size));
+        let (fw, fh) = (iw as f32, ih as f32);
+        let uv = Rect::from_min_max(
+            pos2(x0 as f32 / fw, y0 as f32 / fh),
+            pos2((x0 + CELLS) as f32 / fw, (y0 + CELLS) as f32 / fh),
+        );
+        painter.rect_filled(rect.expand(3.0), 6.0, theme::SURFACE);
+        painter.image(self.texture.id(), rect, uv, Color32::WHITE);
+        let cell = Rect::from_min_size(
+            rect.min + vec2((px - x0) as f32 * CELL, (py - y0) as f32 * CELL),
+            egui::Vec2::splat(CELL),
+        );
+        // Black and white together stay visible on any pixel colour.
+        painter.rect_stroke(cell, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        painter.rect_stroke(cell.expand(1.0), 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Outside);
+        painter.rect_stroke(rect.expand(3.0), 6.0, Stroke::new(1.0, theme::BORDER_HI), StrokeKind::Inside);
+
+        let text = format!("{px}, {py}");
+        let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), theme::MUTED);
+        let label = Rect::from_center_size(
+            pos2(rect.center().x, rect.max.y + 3.0 + label_h / 2.0),
+            galley.size() + vec2(12.0, 4.0),
+        );
+        painter.rect_filled(label, 5.0, theme::SURFACE);
+        painter.galley(label.min + vec2(6.0, 2.0), galley, theme::MUTED);
     }
 
     /// Crosshair, or a move/resize cursor over a selection held open with ⌘.
@@ -653,6 +763,10 @@ impl eframe::App for Overlay {
         }
 
         self.handle_keys(&ctx, screen);
+        if self.tool == Tool::Pixelate {
+            // Build the mosaic as soon as the tool is picked, not on the first drag.
+            self.ensure_mosaic(&ctx, screen);
+        }
         self.hover.update(&ctx);
         let canvas = ui.interact(screen, ui.scope_id().with("canvas"), Sense::click_and_drag());
         self.handle_pointer(ui, &canvas, screen);
@@ -671,7 +785,8 @@ impl eframe::App for Overlay {
             return;
         }
 
-        self.paint(ui.painter(), screen);
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        self.paint(ui.painter(), screen, pointer);
         if self.adjusting.is_some() {
             toolbar::hint(&ctx, "Release ⌘ to copy  ·  drag to move or resize  ·", "⌘Z", 1.0);
             return;
@@ -709,10 +824,14 @@ impl eframe::App for Overlay {
                 "Click to upload the highlight, drag for your own, scroll to resize  ·".to_string()
             }
             Tool::Select => "Click to capture the highlight, drag for your own, scroll to resize  ·".to_string(),
-            _ => format!(
-                "Draw, then press {} and drag to capture  ·",
-                hotkey::pretty(self.tool_keys.get(Tool::Select))
-            ),
+            tool => {
+                let what = match tool {
+                    Tool::Number => "Click to place 1, 2, 3…",
+                    Tool::Pixelate => "Drag over anything private",
+                    _ => "Draw",
+                };
+                format!("{what}, then press {} and drag to capture  ·", hotkey::pretty(self.tool_keys.get(Tool::Select)))
+            }
         };
         toolbar::hint(&ctx, &text, "Esc", opacity);
         if opacity > 0.0 {

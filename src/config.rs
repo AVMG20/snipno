@@ -32,6 +32,8 @@ pub struct ToolKeys {
     pub arrow: String,
     pub rect: String,
     pub ellipse: String,
+    pub pixelate: String,
+    pub number: String,
 }
 
 impl Default for ToolKeys {
@@ -42,6 +44,8 @@ impl Default for ToolKeys {
             arrow: "A".into(),
             rect: "R".into(),
             ellipse: "E".into(),
+            pixelate: "B".into(),
+            number: "N".into(),
         }
     }
 }
@@ -54,6 +58,8 @@ impl ToolKeys {
             Tool::Arrow => &self.arrow,
             Tool::Rect => &self.rect,
             Tool::Ellipse => &self.ellipse,
+            Tool::Pixelate => &self.pixelate,
+            Tool::Number => &self.number,
         }
     }
 
@@ -64,6 +70,8 @@ impl ToolKeys {
             Tool::Arrow => self.arrow = key,
             Tool::Rect => self.rect = key,
             Tool::Ellipse => self.ellipse = key,
+            Tool::Pixelate => self.pixelate = key,
+            Tool::Number => self.number = key,
         }
     }
 }

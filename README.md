@@ -26,7 +26,7 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 | Drag (Select tool) | copy a custom region |
 | `S` `P` `A` `R` `E` | Select, Pen, Arrow, Box, Circle (change them in Settings → Tool shortcuts) |
 | hold `⇧` | square box / perfect circle |
-| `⌘Z` | undo last drawing |
+| `⌘Z` | while dragging: drop the selection or shape and start over; otherwise undo the last drawing |
 | `↩` / **Full screen** | copy the whole screen |
 | `Esc` | cancel |
 

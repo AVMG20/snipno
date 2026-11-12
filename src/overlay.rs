@@ -332,7 +332,12 @@ impl Overlay {
         } else if enter {
             self.copy_and_close(ctx, screen, screen);
         } else if undo {
-            self.shapes.pop();
+            // Mid-drag, ⌘Z drops the selection or shape being dragged so you can start over;
+            // otherwise it removes the last finished drawing.
+            if self.selecting.take().is_none() && self.drawing.take().is_none() {
+                self.shapes.pop();
+            }
+            self.preview = None;
         } else if let Some(t) = tool {
             self.tool = t;
         }

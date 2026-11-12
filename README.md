@@ -64,7 +64,7 @@ One binary, three modes:
 - `snipno capture [--monitor <id>]` (`src/overlay.rs`): the daemon starts one per display (`snipno monitors` lists the ids). The display under the cursor starts last, so it gets keyboard focus. When one overlay copies or cancels, the daemon closes the rest. Each overlay captures its own display with `xcap` before its own window exists. It then shows that image in a borderless eframe window raised above the menu bar (`src/macos.rs`).
 - `snipno settings` (`src/settings.rs`): records the capture hotkey and the tool keys. It reports back to the daemon over stdout: while it records, the daemon pauses the global hotkey, and after a save the daemon reloads the config.
 
-Smart selection (`src/snap.rs`) combines the window list with long straight edges found in the screenshot, so hovering highlights panels, cards and text boxes as well as whole windows.
+Smart selection (`src/snap.rs`) combines the window list with long straight edges found in the screenshot, so hovering highlights panels and cards as well as whole windows. It deliberately ignores small controls such as buttons and text fields, since you usually want the block around them.
 
 Drawings are stored in window points. While you draw, egui paints them on screen. When you copy, `tiny-skia` draws them onto the captured pixels at the Retina scale (`src/annotate.rs`). The logo (`src/icon.rs`) is also drawn in code: `snipno icon out.png 1024` renders it.
 

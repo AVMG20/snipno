@@ -225,6 +225,30 @@ impl Hover {
     }
 }
 
+/// Slim dashed outline along the inside or outside edge of `r`, snapped to whole physical pixels
+/// so the dashes stay crisp on both Retina and 1x displays.
+fn dashed_outline(painter: &egui::Painter, r: Rect, kind: StrokeKind) {
+    const WIDTH: f32 = 1.0;
+    const DASH: f32 = 4.0;
+    const GAP: f32 = 3.0;
+    let ppp = painter.pixels_per_point();
+    let r = match kind {
+        StrokeKind::Inside => r.shrink(WIDTH / 2.0),
+        StrokeKind::Outside => r.expand(WIDTH / 2.0),
+        StrokeKind::Middle => r,
+    };
+    // A stroke an odd number of pixels wide is centred on a pixel centre, an even one on an edge.
+    let odd = (WIDTH * ppp).round() as i32 % 2 == 1;
+    let snap = |v: f32| {
+        let px = v * ppp;
+        let px = if odd { (px - 0.5).round() + 0.5 } else { px.round() };
+        px / ppp
+    };
+    let (l, t, rr, b) = (snap(r.min.x), snap(r.min.y), snap(r.max.x), snap(r.max.y));
+    let path = [pos2(l, t), pos2(rr, t), pos2(rr, b), pos2(l, b), pos2(l, t)];
+    painter.extend(egui::Shape::dashed_line(&path, Stroke::new(WIDTH, theme::ACCENT), DASH, GAP));
+}
+
 /// Save the capture as a temporary PNG and hand it to a detached `snipno upload`, so the overlays
 /// can close while it uploads. That process copies the link and deletes the file.
 fn start_upload(image: &RgbaImage, labels: &str) -> Result<(), Box<dyn Error>> {
@@ -533,9 +557,8 @@ impl Overlay {
         }
 
         if let Some(area) = hover {
-            let full = area == screen;
-            let inset = if full { 1.0 } else { 0.0 }; // keep the border visible at screen edges
-            painter.rect_stroke(area.shrink(inset), 0.0, Stroke::new(2.0, theme::ACCENT), StrokeKind::Inside);
+            // Inside the area, so it stays visible when the area is the whole screen.
+            dashed_outline(painter, area, StrokeKind::Inside);
             let scale = self.scale(screen);
             let label = format!("{} × {}", (area.width() * scale).round(), (area.height() * scale).round());
             toolbar::size_label(painter, area, screen, label);
@@ -543,18 +566,18 @@ impl Overlay {
 
         if let Some((a, b)) = self.selecting {
             let sel = Rect::from_two_pos(a, b);
-            painter.rect_stroke(sel, 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Outside);
+            dashed_outline(painter, sel, StrokeKind::Outside);
             let scale = self.scale(screen);
             let label = format!("{} × {}", (sel.width() * scale).round(), (sel.height() * scale).round());
             toolbar::size_label(painter, sel, screen, label);
         }
 
         if let Some(sel) = held {
-            painter.rect_stroke(sel, 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Outside);
+            dashed_outline(painter, sel, StrokeKind::Outside);
             for c in adjust::handles(sel) {
                 let handle = Rect::from_center_size(c, egui::Vec2::splat(adjust::HANDLE_SIZE));
                 painter.rect_filled(handle, 2.0, Color32::WHITE);
-                painter.rect_stroke(handle, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+                painter.rect_stroke(handle, 2.0, Stroke::new(1.0, theme::ACCENT), StrokeKind::Inside);
             }
             let scale = self.scale(screen);
             let label = format!("{} × {}", (sel.width() * scale).round(), (sel.height() * scale).round());

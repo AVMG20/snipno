@@ -18,14 +18,22 @@ use xcap::image::RgbaImage;
 const EDGE_THRESHOLD: u8 = 9;
 /// Anti-aliasing can break a line for a pixel or two; bridge gaps up to this many pixels.
 const GAP: u32 = 2;
-/// Lines shorter than this (in points) are ignored; text glyphs never get this long.
-const FINE_MIN_LEN_PT: f32 = 40.0;
+/// Lines shorter than this (in points) are ignored. Long enough that words, icons, buttons and
+/// input fields never bound a region, so the smallest target is a card-sized block.
+const FINE_MIN_LEN_PT: f32 = 64.0;
 /// Only lines at least this long (in points) bound "coarse" regions such as whole panels.
-const COARSE_MIN_LEN_PT: f32 = 160.0;
-/// A side only counts if its line covers this fraction of the box edge.
-const MIN_COVERAGE: f32 = 0.6;
-/// Regions smaller than this (points) aren't worth snapping to.
-const MIN_REGION_PT: (f32, f32) = (24.0, 16.0);
+const COARSE_MIN_LEN_PT: f32 = 200.0;
+/// A side only counts if its line covers this fraction of the box edge; real borders cover
+/// nearly all of it, rows of text and partial separators don't.
+const MIN_COVERAGE: f32 = 0.75;
+/// Regions smaller than this (points) aren't worth snapping to: think cards, not buttons.
+const MIN_REGION_PT: (f32, f32) = (80.0, 48.0);
+/// Detected regions sit just inside their border; grow them by this much (points) so the
+/// border itself and a hair of breathing room end up in the capture.
+const REGION_PAD_PT: f32 = 2.0;
+/// Candidates within this many points of each other on every side count as the same target,
+/// so each scroll step visibly grows the selection.
+const SAME_TOLERANCE_PT: f32 = 8.0;
 
 /// Pixel-space box: [left, right) × [top, bottom).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,14 +245,15 @@ impl Snap {
     pub fn candidates(&self, p: Pos2) -> Vec<Rect> {
         let mut out: Vec<Rect> = Vec::new();
         let window = self.windows.iter().find(|w| w.contains(p)).map(|w| w.intersect(self.screen));
-        let bounds = self.to_px(window.unwrap_or(self.screen));
+        let bounds_pt = window.unwrap_or(self.screen);
+        let bounds = self.to_px(bounds_pt);
         let (x, y) = ((p.x * self.scale) as u32, (p.y * self.scale) as u32);
 
         for lines in [&self.fine, &self.coarse] {
             if let Some(r) = lines.region_at(x, y, bounds) {
                 let min = (MIN_REGION_PT.0 * self.scale, MIN_REGION_PT.1 * self.scale);
                 if r.width() as f32 >= min.0 && r.height() as f32 >= min.1 {
-                    push_distinct(&mut out, self.to_pt(r));
+                    push_distinct(&mut out, self.to_pt(r).expand(REGION_PAD_PT).intersect(bounds_pt));
                 }
             }
         }
@@ -274,16 +283,20 @@ impl Snap {
     }
 }
 
-/// Skip near-duplicates (within 2pt on every side) so scrolling always visibly changes size.
+/// Merge near-duplicates so scrolling always visibly changes size. A larger target replaces a
+/// near-identical smaller one, so hovering a window whose content is inset by a border picks
+/// the window itself.
 fn push_distinct(out: &mut Vec<Rect>, r: Rect) {
+    let t = SAME_TOLERANCE_PT;
     let same = |a: &Rect| {
-        (a.min.x - r.min.x).abs() <= 2.0
-            && (a.min.y - r.min.y).abs() <= 2.0
-            && (a.max.x - r.max.x).abs() <= 2.0
-            && (a.max.y - r.max.y).abs() <= 2.0
+        (a.min.x - r.min.x).abs() <= t
+            && (a.min.y - r.min.y).abs() <= t
+            && (a.max.x - r.max.x).abs() <= t
+            && (a.max.y - r.max.y).abs() <= t
     };
-    if !out.iter().any(same) {
-        out.push(r);
+    match out.iter_mut().find(|a| same(a)) {
+        Some(a) => *a = a.union(r),
+        None => out.push(r),
     }
 }
 
@@ -378,7 +391,7 @@ mod tests {
         fill(&mut img, 170, 120, 230, 121, BORDER);
         let lines = Lines::detect(&img, 40);
         let r = lines.region_at(200, 200, screen(400, 300)).unwrap();
-        assert_eq!(r.top, 41, "the narrow line covers <60% of the panel width");
+        assert_eq!(r.top, 41, "the narrow line covers <75% of the panel width");
     }
 
     #[test]
@@ -387,14 +400,15 @@ mod tests {
         let (w, h) = (600, 400);
         let mut img = RgbaImage::from_pixel(w, h, BG);
         fill(&mut img, 160, 0, 162, h, BORDER); // sidebar divider, full height
-        bordered(&mut img, 220, 60, 420, 160); // card: 100x50pt, lines 200px < coarse 320px
+        bordered(&mut img, 220, 60, 520, 260); // card: 150x100pt, lines 300px < coarse 400px
         let window = Rect::from_min_max(pos2(0.0, 0.0), pos2(300.0, 200.0));
         let snap = Snap::new(&img, 2.0, Rect::from_min_max(Pos2::ZERO, pos2(300.0, 200.0)), vec![window]);
 
         let c = snap.candidates(pos2(150.0, 50.0)); // inside the card
         assert_eq!(c.len(), 3, "{c:?}"); // card, right pane, screen (= window here)
-        assert!((c[0].min.x - 110.5).abs() < 0.6 && (c[0].max.x - 209.5).abs() < 0.6, "{:?}", c[0]);
-        assert!((c[1].min.x - 81.0).abs() < 0.6 && c[1].max.x == 300.0, "{:?}", c[1]);
+        // Card interior is 110.5..259.5pt, padded by 2pt to take in its border.
+        assert!((c[0].min.x - 108.5).abs() < 0.6 && (c[0].max.x - 261.5).abs() < 0.6, "{:?}", c[0]);
+        assert!((c[1].min.x - 79.0).abs() < 0.6 && c[1].max.x == 300.0, "{:?}", c[1]);
         assert_eq!(c.last(), Some(&Rect::from_min_max(Pos2::ZERO, pos2(300.0, 200.0))));
     }
 
@@ -406,6 +420,27 @@ mod tests {
         let snap = Snap::new(&img, 1.0, screen_pt, vec![window]);
         assert_eq!(snap.candidates(pos2(100.0, 100.0)), vec![window, screen_pt]);
         assert_eq!(snap.candidates(pos2(300.0, 250.0)), vec![screen_pt]);
+    }
+
+    #[test]
+    fn small_controls_snap_to_the_card_around_them() {
+        let mut img = RgbaImage::from_pixel(400, 300, BG);
+        bordered(&mut img, 50, 40, 350, 260); // card
+        bordered(&mut img, 100, 100, 160, 128); // 60x28 button inside it
+        let screen_pt = Rect::from_min_max(Pos2::ZERO, pos2(400.0, 300.0));
+        let snap = Snap::new(&img, 1.0, screen_pt, vec![]);
+        let card = Rect::from_min_max(pos2(49.0, 39.0), pos2(351.0, 261.0));
+        assert_eq!(snap.candidates(pos2(120.0, 110.0)), vec![card, screen_pt]);
+    }
+
+    #[test]
+    fn near_identical_targets_merge_into_the_larger_one() {
+        let mut out = Vec::new();
+        let inner = Rect::from_min_max(pos2(14.0, 30.0), pos2(194.0, 146.0));
+        let window = Rect::from_min_max(pos2(10.0, 24.0), pos2(200.0, 150.0));
+        push_distinct(&mut out, inner);
+        push_distinct(&mut out, window);
+        assert_eq!(out, vec![window]);
     }
 
     #[test]

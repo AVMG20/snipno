@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>snipno · screenshots for your Mac menu bar</title>
-<meta name="description" content="snipno is a free, open-source menu bar screenshot tool for macOS. Press a hotkey, draw on the frozen screen, click a window or drag an area, and it's on your clipboard.">
+<title>snipno · screenshots for your Mac</title>
+<meta name="description" content="A tiny open-source menu bar screenshot tool for macOS. Press a hotkey, draw, select, paste.">
 <meta property="og:title" content="snipno">
-<meta property="og:description" content="Snip, scribble, paste. A tiny open-source screenshot tool for macOS, built in Rust.">
+<meta property="og:description" content="Snip, scribble, paste. A tiny open-source screenshot tool for macOS.">
 <meta property="og:image" content="logo.png">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg: #0d0d0f;
     --surface: #151518;
-    --surface-hi: #1f1f23;
     --border: #28282d;
     --border-hi: #3a3a40;
     --text: #ececef;
@@ -25,74 +24,41 @@
     --accent: #ff6a3d;
     --accent-2: #ffa94d;
     --accent-soft: rgba(255, 106, 61, .14);
-    --radius: 12px;
-    --max: 1120px;
   }
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
   body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
+    margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.6 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    -webkit-font-smoothing: antialiased;
-    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
   }
   a { color: inherit; text-decoration: none; }
-  code, kbd, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
 
-  /* Background: faint grid + warm glow at the top */
   .backdrop {
-    position: absolute; inset: 0 0 auto 0; height: 980px; pointer-events: none; z-index: -1;
+    position: absolute; inset: 0 0 auto 0; height: 820px; pointer-events: none; z-index: -1;
     background:
-      radial-gradient(600px 380px at 50% 0%, rgba(255, 106, 61, .28), transparent 70%),
-      linear-gradient(to right, rgba(255,255,255,.035) 1px, transparent 1px) 0 0 / 64px 64px,
-      linear-gradient(to bottom, rgba(255,255,255,.035) 1px, transparent 1px) 0 0 / 64px 64px;
-    -webkit-mask-image: linear-gradient(to bottom, #000 40%, transparent);
-            mask-image: linear-gradient(to bottom, #000 40%, transparent);
+      radial-gradient(560px 340px at 50% 0%, rgba(255, 106, 61, .24), transparent 70%),
+      linear-gradient(to right, rgba(255,255,255,.03) 1px, transparent 1px) 0 0 / 64px 64px,
+      linear-gradient(to bottom, rgba(255,255,255,.03) 1px, transparent 1px) 0 0 / 64px 64px;
+    -webkit-mask-image: linear-gradient(to bottom, #000 35%, transparent);
+            mask-image: linear-gradient(to bottom, #000 35%, transparent);
   }
 
-  /* Nav */
-  nav { display: flex; align-items: center; justify-content: space-between; height: 68px; border-bottom: 1px solid rgba(255,255,255,.06); }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
-  .brand img { width: 30px; height: 30px; }
-  .nav-links { display: flex; align-items: center; gap: 28px; color: var(--muted); font-size: 15px; }
-  .nav-links a:hover { color: var(--text); }
-  .btn {
-    display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px;
-    border-radius: 9px; font-weight: 600; font-size: 15px; transition: transform .15s, background .15s, border-color .15s;
-  }
-  .btn:hover { transform: translateY(-1px); }
-  .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 8px 30px rgba(255, 106, 61, .35); }
-  .btn-primary:hover { background: #ff7a50; }
-  .btn-ghost { background: var(--surface); border: 1px solid var(--border-hi); }
-  .btn-ghost:hover { border-color: #55555c; }
-  .btn-lg { height: 50px; padding: 0 24px; font-size: 16px; }
+  nav { display: flex; align-items: center; justify-content: space-between; height: 68px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
+  .brand img { width: 28px; height: 28px; }
+  .gh { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 15px; transition: color .15s; }
+  .gh:hover { color: var(--text); }
 
-  /* Hero */
-  .hero { text-align: center; padding: 96px 0 56px; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 10px; padding: 5px 14px 5px 6px;
-    border: 1px solid var(--border-hi); border-radius: 999px; background: rgba(21,21,24,.7);
-    color: var(--muted); font-size: 14px; flex-wrap: wrap; justify-content: center; max-width: 100%;
-  }
-  .pill b { color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px; font-size: 12px; letter-spacing: .06em; font-weight: 600; }
-  h1 {
-    margin: 28px auto 20px; max-width: 900px;
-    font-size: clamp(38px, 9vw, 86px); line-height: 1.02; letter-spacing: -.045em; font-weight: 800;
-  }
+  .hero { text-align: center; padding: 72px 0 0; }
+  h1 { margin: 0 0 16px; font-size: clamp(40px, 8vw, 72px); line-height: 1.02; letter-spacing: -.045em; font-weight: 800; }
   .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .lead { max-width: 640px; margin: 0 auto; color: var(--muted); font-size: 19px; }
-  .cta { display: flex; justify-content: center; gap: 12px; margin-top: 36px; flex-wrap: wrap; }
-  .fineprint { margin-top: 18px; color: var(--faint); font-size: 14px; }
+  .lead { margin: 0; color: var(--muted); font-size: 18px; }
 
-  /* Demo: a mock screen with the overlay on top */
-  .demo { margin: 40px auto 0; max-width: 1000px; }
+  /* Example: a mock screen with snipno's overlay on top */
   .screen {
-    position: relative; border: 1px solid var(--border-hi); border-radius: 16px; overflow: hidden;
-    background: #111114; box-shadow: 0 40px 120px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.02) inset;
-    aspect-ratio: 16 / 9.4;
+    position: relative; margin-top: 56px; border: 1px solid var(--border-hi); border-radius: 16px; overflow: hidden;
+    background: #111114; box-shadow: 0 40px 120px rgba(0,0,0,.6); aspect-ratio: 1000 / 588;
   }
   .menubar { height: 26px; display: flex; align-items: center; gap: 18px; padding: 0 14px; background: #1b1b1f; border-bottom: 1px solid #222; color: #9a9aa2; font-size: 12px; }
   .menubar span:first-child { color: #ddd; font-weight: 600; }
@@ -102,38 +68,35 @@
   .side i:nth-child(1) { width: 70%; background: #2c2c33; }
   .side i:nth-child(3) { width: 85%; } .side i:nth-child(4) { width: 60%; } .side i:nth-child(6) { width: 75%; }
   .main { padding: 22px; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 18% 1fr 1fr; gap: 14px; }
-  .main .bar { grid-column: 1 / -1; border-radius: 10px; background: #18181c; border: 1px solid #25252b; }
+  .bar { grid-column: 1 / -1; border-radius: 10px; background: #18181c; border: 1px solid #25252b; }
   .card { border-radius: 10px; background: #18181c; border: 1px solid #25252b; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
   .card i { display: block; height: 8px; border-radius: 4px; background: #26262c; }
   .card i:first-child { width: 55%; height: 10px; background: #303037; }
   .card i:nth-child(3) { width: 80%; } .card i:nth-child(4) { width: 40%; }
   .card.wide { grid-column: span 2; }
-  .dim { position: absolute; inset: 0; background: rgba(0,0,0,.42); }
+
   .snap {
-    position: absolute; border: 2px solid var(--accent); border-radius: 2px;
+    position: absolute; border: 2px solid var(--accent); border-radius: 3px;
     box-shadow: 0 0 0 9999px rgba(0,0,0,.42); /* dims everything outside the highlight */
-    animation: hop 9s infinite;
+    transition: left .45s cubic-bezier(.2,.8,.2,1), top .45s cubic-bezier(.2,.8,.2,1),
+                width .45s cubic-bezier(.2,.8,.2,1), height .45s cubic-bezier(.2,.8,.2,1);
   }
   .size {
-    position: absolute; top: -30px; left: -2px; background: var(--surface); border: 1px solid var(--border);
-    color: var(--text); font: 500 11px/1 "JetBrains Mono", monospace; padding: 6px 8px; border-radius: 6px; white-space: nowrap;
+    position: absolute; left: 6px; bottom: 6px; background: var(--surface); border: 1px solid var(--border);
+    font: 500 11px/1 "JetBrains Mono", ui-monospace, monospace; padding: 5px 7px; border-radius: 6px; white-space: nowrap;
   }
-  .size::after { content: attr(data-size); }
-  /* Smart selection hopping between targets: card → whole panel → card */
-  @keyframes hop {
-    0%, 28%   { left: calc(22% + 22px); top: calc(26px + (100% - 26px) * .18 + 36px); width: calc((78% - 72px) / 3); height: calc((100% - 26px - 44px - 28px) * .41); }
-    36%, 62%  { left: 22%; top: 26px; width: 78%; height: calc(100% - 26px); }
-    70%, 100% { left: calc(22% + 22px + (78% - 72px) / 3 + 14px); top: calc(26px + (100% - 26px) * .18 + 36px); width: calc((78% - 72px) / 3 * 2 + 14px); height: calc((100% - 26px - 44px - 28px) * .41); }
-  }
+
+  /* Arrow like snipno's arrow tool: straight shaft, filled triangular head */
   .ink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .ink path, .ink ellipse { fill: none; stroke: #ff5c48; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
-  .ink .draw { stroke-dasharray: 600; stroke-dashoffset: 600; animation: draw 9s infinite; }
-  @keyframes draw { 0%, 8% { stroke-dashoffset: 600; } 22%, 100% { stroke-dashoffset: 0; } }
+  .shaft { stroke: #ff5c48; stroke-width: 5; stroke-linecap: round; stroke-dasharray: 270; stroke-dashoffset: 270; animation: shaft 8s infinite; }
+  .head { fill: #ff5c48; fill-opacity: 0; animation: head 8s infinite; }
+  @keyframes shaft { 0%, 6% { stroke-dashoffset: 270; } 16%, 100% { stroke-dashoffset: 0; } }
+  @keyframes head { 0%, 15% { fill-opacity: 0; } 16%, 100% { fill-opacity: 1; } }
 
   .toolbar {
-    position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+    position: absolute; top: 40px; left: 50%; transform: translateX(-50%); z-index: 2;
     display: flex; align-items: center; gap: 2px; padding: 5px; border-radius: 12px;
-    background: var(--surface); border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.55); z-index: 2;
+    background: var(--surface); border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,.55);
   }
   .tb { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #c8c8ce; }
   .tb.on { background: var(--accent-soft); color: var(--accent); }
@@ -142,245 +105,122 @@
   .dot { width: 22px; height: 30px; display: grid; place-items: center; }
   .dot::before { content: ""; width: 13px; height: 13px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1px rgba(255,255,255,.12); }
   .dot.on::before { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--text); }
-  .w { width: 26px; height: 30px; display: grid; place-items: center; border-radius: 8px; }
-  .w::before { content: ""; width: var(--s); height: var(--s); border-radius: 50%; background: var(--muted); }
-  .w.on { background: var(--surface-hi); box-shadow: 0 0 0 1px var(--border-hi) inset; }
-  .w.on::before { background: var(--text); }
 
-  /* Sections */
-  section { padding: 96px 0 0; }
-  .eyebrow { color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
-  h2 { font-size: clamp(30px, 4vw, 44px); letter-spacing: -.03em; line-height: 1.1; margin: 10px 0 14px; font-weight: 750; }
-  .sub { color: var(--muted); max-width: 620px; margin: 0 0 40px; font-size: 17px; }
+  .notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 48px; }
+  .note { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .note h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .note p { margin: 0; color: var(--muted); font-size: 14.5px; }
 
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  .feature { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; transition: border-color .2s, transform .2s; }
-  .feature:hover { border-color: var(--border-hi); transform: translateY(-2px); }
-  .feature .ic { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: 16px; }
-  .feature .ic svg { width: 19px; height: 19px; }
-  .feature h3 { margin: 0 0 6px; font-size: 17px; letter-spacing: -.01em; }
-  .feature p { margin: 0; color: var(--muted); font-size: 15px; }
-
-  .split { display: grid; grid-template-columns: 1.05fr .95fr; gap: 48px; align-items: center; }
-  .keys { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 18px; border-top: 1px solid var(--border); font-size: 15px; }
-  .row:first-child { border-top: 0; }
-  .row span { color: var(--muted); }
-  kbd {
-    display: inline-block; min-width: 26px; text-align: center; padding: 2px 7px; margin-left: 4px;
-    background: var(--surface-hi); border: 1px solid var(--border-hi); border-bottom-width: 2px; border-radius: 6px;
-    font-size: 13px; color: var(--text);
-  }
-  .shot { width: 100%; border-radius: 14px; border: 1px solid var(--border-hi); box-shadow: 0 30px 80px rgba(0,0,0,.5); display: block; }
-  .caption { color: var(--faint); font-size: 14px; margin-top: 12px; text-align: center; }
-
+  .install { margin-top: 72px; }
+  .install h2 { margin: 0 0 14px; font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
   pre {
-    margin: 0; padding: 22px 24px; background: #0a0a0c; border: 1px solid var(--border); border-radius: var(--radius);
-    color: #d8d8de; font-size: 14px; line-height: 1.8; overflow-x: auto;
+    margin: 0; padding: 18px 22px; background: #0a0a0c; border: 1px solid var(--border); border-radius: 12px;
+    font: 500 14px/1.9 "JetBrains Mono", ui-monospace, monospace; color: #d8d8de; overflow-x: auto;
   }
-  pre .c { color: var(--faint); }
-  pre .p { color: var(--accent); user-select: none; }
-  .steps { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
-  .note { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; color: var(--muted); font-size: 15px; }
-  .note b { color: var(--text); }
-  .note p { margin: 0 0 12px; } .note p:last-child { margin: 0; }
+  pre span { color: var(--accent); user-select: none; }
+  .hint { margin: 12px 0 0; color: var(--faint); font-size: 14px; }
 
-  footer { margin-top: 120px; border-top: 1px solid rgba(255,255,255,.06); padding: 32px 0 48px; color: var(--faint); font-size: 14px; }
-  footer .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer { margin-top: 72px; padding: 28px 0 40px; border-top: 1px solid rgba(255,255,255,.06); color: var(--faint); font-size: 14px; text-align: center; }
   footer a:hover { color: var(--text); }
 
-  @media (max-width: 900px) {
-    .grid { grid-template-columns: 1fr 1fr; }
-    .split, .steps { grid-template-columns: 1fr; }
-    .toolbar { transform: translateX(-50%) scale(.72); transform-origin: top center; top: 34px; }
-  }
-  @media (max-width: 600px) {
-    .wrap { padding: 0 16px; }
-    .nav-links a:not(.btn) { display: none; }
-    .hero { padding-top: 64px; }
-    .grid { grid-template-columns: 1fr; }
-    .toolbar { transform: translateX(-50%) scale(.5); }
+  @media (max-width: 760px) {
+    .notes { grid-template-columns: 1fr; }
+    .toolbar { transform: translateX(-50%) scale(.62); transform-origin: top center; top: 32px; }
     .size { display: none; }
-    .lead { font-size: 17px; }
-    .btn-lg { height: 46px; padding: 0 18px; }
   }
+  @media (max-width: 600px) { .wrap { padding: 0 16px; } .hero { padding-top: 48px; } .lead { font-size: 17px; } }
   @media (prefers-reduced-motion: reduce) {
-    .snap, .ink .draw { animation: none; }
-    .ink .draw { stroke-dashoffset: 0; }
+    .snap { transition: none; }
+    .shaft, .head { animation: none; stroke-dashoffset: 0; fill-opacity: 1; }
   }
 </style>
 </head>
 <body>
 <div class="backdrop" aria-hidden="true"></div>
 
-<header class="wrap">
+<div class="wrap">
   <nav>
     <a class="brand" href="#"><img src="logo.png" alt="">snipno</a>
-    <div class="nav-links">
-      <a href="#features">Features</a>
-      <a href="#shortcuts">Shortcuts</a>
-      <a href="#install">Install</a>
-      <a class="btn btn-ghost" href="https://github.com/AVMG20/snipno">
-        <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        GitHub
-      </a>
-    </div>
+    <a class="gh" href="https://github.com/AVMG20/snipno">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
   </nav>
-</header>
 
-<main>
-  <div class="wrap hero">
-    <span class="pill"><b>OPEN SOURCE</b> MIT licensed · macOS · built in Rust</span>
-    <h1>Snip, scribble, <span class="grad">paste.</span></h1>
-    <p class="lead">snipno is a tiny screenshot tool that lives in your Mac's menu bar. Press a hotkey, mark things up on the frozen screen, then click a window or drag an area. It's on your clipboard.</p>
-    <div class="cta">
-      <a class="btn btn-primary btn-lg" href="https://github.com/AVMG20/snipno">View on GitHub
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-      </a>
-      <a class="btn btn-ghost btn-lg" href="#install">Install in a minute</a>
-    </div>
-    <p class="fineprint">Free. No account, no uploads, no tracking. Your screenshots never leave your Mac.</p>
+  <main>
+    <section class="hero">
+      <h1>Snip, scribble, <span class="grad">paste.</span></h1>
+      <p class="lead">A tiny screenshot tool for your Mac's menu bar.</p>
+    </section>
 
-    <div class="demo" aria-label="Illustration of the snipno overlay: a toolbar at the top, a highlighted panel and an arrow drawn on the screen">
-      <div class="screen">
-        <div class="menubar"><span>Finder</span><span>File</span><span>Edit</span><span>View</span><span>Window</span></div>
-        <div class="app">
-          <div class="side"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-          <div class="main">
-            <div class="bar"></div>
-            <div class="card"><i></i><i></i><i></i><i></i></div>
-            <div class="card wide"><i></i><i></i><i></i><i></i></div>
-            <div class="card wide"><i></i><i></i><i></i><i></i></div>
-            <div class="card"><i></i><i></i><i></i><i></i></div>
-          </div>
-        </div>
-        <div class="snap"><span class="size" data-size=""></span></div>
-        <svg class="ink" viewBox="0 0 1000 588" preserveAspectRatio="none" aria-hidden="true">
-          <path class="draw" d="M 860 520 C 800 470, 740 430, 640 380"/>
-          <path class="draw" d="M 640 380 L 672 380 M 640 380 L 652 352"/>
-        </svg>
-        <div class="toolbar" aria-hidden="true">
-          <span class="tb on"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6V1.5H6M10 1.5h4.5V6M14.5 10v4.5H10M6 14.5H1.5V10"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.8l2.7 2.7-8.6 8.6-3.6.9.9-3.6z"/><path d="M9.6 3.7l2.7 2.7"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 13.5l11-11M6.5 2.5h7v7"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1.8" y="1.8" width="12.4" height="12.4" rx="3"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.6"/></svg></span>
-          <span class="sep"></span>
-          <span class="dot on" style="--c:#ff5c48"></span><span class="dot" style="--c:#ffc43d"></span><span class="dot" style="--c:#34c77b"></span><span class="dot" style="--c:#3898ff"></span><span class="dot" style="--c:#f5f5f7"></span><span class="dot" style="--c:#121214"></span>
-          <span class="sep"></span>
-          <span class="w" style="--s:3px"></span><span class="w on" style="--s:6px"></span><span class="w" style="--s:10px"></span>
-          <span class="sep"></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h7a4 4 0 010 8H5M5 3L2 6l3 3"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="2" width="14" height="9.5" rx="2"/><path d="M8 11.5V14M5 14.5h6"/></svg></span>
-          <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span>
+    <div class="screen" role="img" aria-label="The snipno toolbar over a frozen screen, with a highlighted panel and an arrow drawn on it">
+      <div class="menubar"><span>Finder</span><span>File</span><span>Edit</span><span>View</span><span>Window</span></div>
+      <div class="app">
+        <div class="side" data-snap="4"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="main" data-snap="3">
+          <div class="bar"></div>
+          <div class="card" data-snap="1"><i></i><i></i><i></i><i></i></div>
+          <div class="card wide"><i></i><i></i><i></i><i></i></div>
+          <div class="card wide" data-snap="2"><i></i><i></i><i></i><i></i></div>
+          <div class="card"><i></i><i></i><i></i><i></i></div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <section id="features">
-    <div class="wrap">
-      <div class="eyebrow">Features</div>
-      <h2>Everything a screenshot needs.<br>Nothing it doesn't.</h2>
-      <p class="sub">snipno covers what you'd expect from Windows' Snipping Tool, redone for the Mac, and stays out of your way the rest of the time.</p>
-      <div class="grid">
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V3h5M16 3h5v5M21 16v5h-5M8 21H3v-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></div>
-          <h3>Smart selection</h3>
-          <p>Hover and snipno highlights the window, panel, card or text box under your cursor. Click to capture it, scroll to grow the selection, or drag your own area.</p>
-        </article>
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg></div>
-          <h3>Draw first, snip after</h3>
-          <p>Pen, arrow, box and circle, six colours and three line widths, all drawn on the frozen screen before you pick the area. Hold ⇧ for perfect squares and circles.</p>
-        </article>
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="13" rx="2"/><path d="M16 21H5a2 2 0 01-2-2V8"/></svg></div>
-          <h3>Straight to the clipboard</h3>
-          <p>No save dialog and no editor window. The capture lands on your clipboard at full Retina resolution, with your drawings included, ready to paste.</p>
-        </article>
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="13" height="10" rx="2"/><rect x="17" y="7" width="5" height="9" rx="1.5"/><path d="M6 18h5"/></svg></div>
-          <h3>Every display at once</h3>
-          <p>The hotkey freezes all your screens together, so you capture on whichever one you're looking at. The others close as soon as you're done.</p>
-        </article>
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></div>
-          <h3>Your shortcuts</h3>
-          <p>Any capture hotkey you like, including Insert and a Windows keyboard's PrtSc. Tool keys default to S P A R E and can all be changed.</p>
-        </article>
-        <article class="feature">
-          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div>
-          <h3>Small and native</h3>
-          <p>One Rust binary of about 16 MB, built with egui and drawn on the GPU. It sits in the menu bar with no Dock icon and uses no CPU until you press the hotkey.</p>
-        </article>
+      <div class="snap"><span class="size"></span></div>
+      <!-- Straight arrow from (880,530) to (640,380); the head is 26 units long on the same line. -->
+      <svg class="ink" viewBox="0 0 1000 588" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+        <line class="shaft" x1="880" y1="530" x2="655.4" y2="389.6"/>
+        <polygon class="head" points="640,380 670.3,380.6 653.8,407"/>
+      </svg>
+      <div class="toolbar" aria-hidden="true">
+        <span class="tb on"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 6V1.5H6M10 1.5h4.5V6M14.5 10v4.5H10M6 14.5H1.5V10"/></svg></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.8l2.7 2.7-8.6 8.6-3.6.9.9-3.6z"/><path d="M9.6 3.7l2.7 2.7"/></svg></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 13.5l11-11M6.5 2.5h7v7"/></svg></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1.8" y="1.8" width="12.4" height="12.4" rx="3"/></svg></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.6"/></svg></span>
+        <span class="sep"></span>
+        <span class="dot on" style="--c:#ff5c48"></span><span class="dot" style="--c:#ffc43d"></span><span class="dot" style="--c:#34c77b"></span><span class="dot" style="--c:#3898ff"></span><span class="dot" style="--c:#f5f5f7"></span>
+        <span class="sep"></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h7a4 4 0 010 8H5M5 3L2 6l3 3"/></svg></span>
+        <span class="tb"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span>
       </div>
     </div>
-  </section>
 
-  <section id="shortcuts">
-    <div class="wrap split">
-      <div>
-        <div class="eyebrow">Shortcuts</div>
-        <h2>Fast with the keyboard</h2>
-        <p class="sub">Everything in the overlay has a key. Change the capture hotkey and the tool keys from the menu bar icon → Settings.</p>
-        <div class="keys">
-          <div class="row">Start a capture <span><kbd>⇧</kbd><kbd>⌘</kbd><kbd>2</kbd></span></div>
-          <div class="row">Select · Pen · Arrow · Box · Circle <span><kbd>S</kbd><kbd>P</kbd><kbd>A</kbd><kbd>R</kbd><kbd>E</kbd></span></div>
-          <div class="row">Capture the highlighted area <span>click</span></div>
-          <div class="row">Grow or shrink the highlight <span>scroll</span></div>
-          <div class="row">Undo last drawing <span><kbd>⌘</kbd><kbd>Z</kbd></span></div>
-          <div class="row">Copy the whole screen <span><kbd>↩</kbd></span></div>
-          <div class="row">Cancel <span><kbd>Esc</kbd></span></div>
-        </div>
-      </div>
-      <figure style="margin:0">
-        <img class="shot" src="settings.png" alt="snipno settings window with the capture shortcut and tool shortcuts" width="460" height="610" loading="lazy">
-        <figcaption class="caption">Settings: record a new shortcut by pressing it.</figcaption>
-      </figure>
+    <div class="notes">
+      <div class="note"><h3>Smart selection</h3><p>Hover a window or panel, click to grab it.</p></div>
+      <div class="note"><h3>Draw first</h3><p>Pen, arrow, box and circle.</p></div>
+      <div class="note"><h3>Clipboard</h3><p>No dialogs. Just paste.</p></div>
     </div>
-  </section>
 
-  <section id="install">
-    <div class="wrap">
-      <div class="eyebrow">Install</div>
-      <h2>Up and running in a minute</h2>
-      <p class="sub">snipno builds from source on macOS 12 or newer. You need a recent Rust toolchain; <code>rustup</code> sets that up.</p>
-      <div class="steps">
-<pre><span class="p">$ </span>git clone https://github.com/AVMG20/snipno
-<span class="p">$ </span>cd snipno
-<span class="c"># once: a local signing certificate, so macOS</span>
-<span class="c"># remembers the permission across rebuilds</span>
-<span class="p">$ </span>./make-signing-cert.sh
-<span class="c"># build, copy to /Applications and start</span>
-<span class="p">$ </span>./bundle.sh --install</pre>
-        <div class="note">
-          <p><b>First capture:</b> macOS asks for Screen Recording permission. Allow it in System Settings → Privacy &amp; Security, then quit and reopen snipno from its menu bar icon.</p>
-          <p><b>Start at login:</b> add Snipno under System Settings → General → Login Items.</p>
-          <p><b>Uninstall:</b> quit it from the menu bar and delete <code>/Applications/Snipno.app</code>.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-</main>
+    <section class="install">
+      <h2>Install</h2>
+<pre><span>$ </span>git clone https://github.com/AVMG20/snipno && cd snipno
+<span>$ </span>./make-signing-cert.sh
+<span>$ </span>./bundle.sh --install</pre>
+      <p class="hint">Needs Rust and macOS 12+. Allow Screen Recording on first capture.</p>
+    </section>
+  </main>
+</div>
 
-<footer>
-  <div class="wrap">
-    <a class="brand" href="#"><img src="logo.png" alt="">snipno</a>
-    <span>MIT licensed · <a href="https://github.com/AVMG20/snipno">github.com/AVMG20/snipno</a></span>
-  </div>
-</footer>
+<footer><a href="https://github.com/AVMG20/snipno">GitHub</a> · MIT</footer>
 
 <script>
-  // Keep the size label on the hopping highlight in sync with its on-screen size (Retina pixels).
+  // The highlight hops between elements of the mock app and snaps to their exact bounds.
+  const screen = document.querySelector('.screen');
   const snap = document.querySelector('.snap'), label = document.querySelector('.size');
-  if (snap && label) {
-    const tick = () => {
-      const r = snap.getBoundingClientRect();
-      label.dataset.size = `${Math.round(r.width * 2)} × ${Math.round(r.height * 2)}`;
-      requestAnimationFrame(tick);
-    };
-    tick();
+  const targets = [...document.querySelectorAll('[data-snap]')].sort((a, b) => a.dataset.snap - b.dataset.snap);
+  let current = 0;
+  const place = () => {
+    const s = screen.getBoundingClientRect(), r = targets[current].getBoundingClientRect();
+    Object.assign(snap.style, {
+      left: `${r.left - s.left}px`, top: `${r.top - s.top}px`,
+      width: `${r.width}px`, height: `${r.height}px`,
+    });
+    label.textContent = `${Math.round(r.width * 2)} × ${Math.round(r.height * 2)}`; // Retina pixels
+  };
+  place();
+  addEventListener('resize', place);
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    setInterval(() => { current = (current + 1) % targets.length; place(); }, 2000);
   }
 </script>
 </body>

@@ -632,11 +632,21 @@ impl Overlay {
             toolbar::size_label(painter, sel, screen, label);
         }
 
-        // Magnifier while dragging out or resizing a selection, for pixel-exact edges.
-        let resizing =
-            self.adjusting.as_ref().is_some_and(|a| a.grab.is_some_and(|(grip, ..)| grip != Grip::MOVE));
-        if (self.selecting.is_some() || resizing)
-            && let Some(p) = pointer
+        // Magnifier for pixel-exact edges: while dragging out or resizing a selection, and in
+        // Select mode before you start, so you can line up the first corner too.
+        let grab = self.adjusting.as_ref().and_then(|a| a.grab.map(|(grip, ..)| grip));
+        let loupe_at = if self.selecting.is_some() || grab.is_some_and(|g| g != Grip::MOVE) {
+            pointer
+        } else if self.tool == Tool::Select && self.drawing.is_none() && grab.is_none() {
+            // `hover.pos` starts at the OS cursor and clears when the mouse leaves this display.
+            self.hover.pos
+        } else {
+            None
+        };
+        // Not while the cursor is over the toolbar or another panel.
+        let over_ui = |p: Pos2| painter.ctx().layer_id_at(p).is_some_and(|l| l != painter.layer_id());
+        if let Some(p) = loupe_at
+            && !over_ui(p)
         {
             self.paint_loupe(painter, screen, p);
         }

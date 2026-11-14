@@ -51,7 +51,6 @@ pub const TOP: f32 = 16.0;
 pub enum Action {
     Undo,
     FullScreen,
-    ToggleUpload,
     Close,
 }
 
@@ -60,9 +59,6 @@ pub struct State<'a> {
     pub color: &'a mut Color32,
     pub width: &'a mut f32,
     pub can_undo: bool,
-    /// Whether the capture is uploaded instead of copied; `None` hides the button (no uploader
-    /// set up).
-    pub upload: Option<bool>,
     pub keys: &'a crate::config::ToolKeys,
 }
 
@@ -77,7 +73,6 @@ enum Icon {
     Pixelate,
     Undo,
     Screen,
-    Upload,
     Close,
 }
 
@@ -123,16 +118,11 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
                         if icon_button(ui, Icon::Undo, false, st.can_undo).on_hover_text(tip("Undo", "⌘Z")).clicked() {
                             action = Some(Action::Undo);
                         }
-                        let uploading = st.upload == Some(true);
-                        let screen_tip = if uploading { "Upload full screen" } else { "Copy full screen" };
-                        if icon_button(ui, Icon::Screen, false, true).on_hover_text(tip(screen_tip, "↩")).clicked() {
+                        if icon_button(ui, Icon::Screen, false, true)
+                            .on_hover_text(tip("Copy full screen", "↩"))
+                            .clicked()
+                        {
                             action = Some(Action::FullScreen);
-                        }
-                        if let Some(on) = st.upload {
-                            let name = if on { "Uploading  ·  click to copy instead" } else { "Upload instead of copying" };
-                            if icon_button(ui, Icon::Upload, on, true).on_hover_text(tip(name, "⌘U")).clicked() {
-                                action = Some(Action::ToggleUpload);
-                            }
                         }
                         if icon_button(ui, Icon::Close, false, true).on_hover_text(tip("Cancel", "Esc")).clicked() {
                             action = Some(Action::Close);
@@ -141,36 +131,6 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
                 });
         });
     action
-}
-
-/// Upload on: a pill under the toolbar with the labels that go along with the upload.
-pub fn labels_field(ctx: &egui::Context, labels: &mut String) {
-    egui::Area::new(Id::unique("snipno-labels"))
-        .order(Order::Foreground)
-        .anchor(Align2::CENTER_TOP, [0.0, TOP + BTN + 10.0 + 12.0 + 36.0])
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::SURFACE)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(CornerRadius::same(255))
-                .inner_margin(Margin { left: 12, right: 8, top: 4, bottom: 4 })
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(egui::RichText::new("Upload").size(12.0).color(theme::ACCENT).strong());
-                        ui.label(egui::RichText::new("labels").size(12.0).color(theme::MUTED));
-                        ui.add(
-                            egui::TextEdit::singleline(labels)
-                                .hint_text("none")
-                                .desired_width(200.0)
-                                .font(FontId::proportional(12.5))
-                                .text_color(theme::TEXT)
-                                .background_color(theme::SURFACE_HI)
-                                .margin(vec2(8.0, 3.0)),
-                        );
-                    });
-                });
-        });
 }
 
 /// Small pill under the toolbar that fades out after a few seconds.
@@ -343,12 +303,6 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             );
             line(&[at(8.0, 11.5), at(8.0, 14.0)]);
             line(&[at(5.0, 14.5), at(11.0, 14.5)]);
-        }
-        Icon::Upload => {
-            // Arrow rising out of a tray.
-            line(&[at(2.0, 9.5), at(2.0, 14.0), at(14.0, 14.0), at(14.0, 9.5)]);
-            line(&[at(8.0, 10.5), at(8.0, 2.0)]);
-            line(&[at(4.5, 5.5), at(8.0, 2.0), at(11.5, 5.5)]);
         }
         Icon::Close => {
             line(&[at(3.5, 3.5), at(12.5, 12.5)]);

@@ -31,42 +31,18 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 | hold `⇧` | square box / perfect circle |
 | `⌘Z` | while dragging or holding a selection open: drop it and start over; otherwise undo the last drawing |
 | `↩` / **Full screen** | copy the whole screen |
-| `⌘U` / **Upload** button | upload this capture and copy its link instead of the image (shown once an uploader is set up) |
 | `Esc` | drop a selection held open, otherwise cancel |
 
 To change the capture hotkey or the tool keys, click the menu bar icon → **Settings…**. A new capture hotkey works as soon as you've recorded it. Any key combination is allowed, including Insert and a Windows keyboard's PrtSc (which reaches a Mac as F13). Config is stored in `~/Library/Application Support/snipno/config.json`.
 
 ## Saved screenshots
 
-Every capture is also saved as a PNG, by default in `~/Pictures/snipno`. The last ten are listed under **Recent screenshots** in the menu bar menu, where you can copy the image or its link again, upload it, or show it in Finder. Change it in **Settings → Saving**:
+Every capture is also saved as a PNG, by default in `~/Pictures/snipno`. The last ten are listed under **Recent screenshots** in the menu bar menu, where you can copy the image again or show it in Finder; **Open screenshots folder** opens the folder. Change it in **Settings → Saving**:
 
 - **Save screenshots**: switch saving off to only copy to the clipboard.
 - **Folder**: type a path (`~` is your home folder) or click **Choose…**.
-- **File name**: same placeholders as the upload name below. The default, `Screenshot {date} at {time}`, gives `Screenshot 2026-11-12 at 14-05-09.png`. A name that's taken gets ` 2`, ` 3`… added; nothing is overwritten.
+- **File name**: `.png` is added. `{date}`, `{time}` and `{timestamp}` (Unix seconds) are filled in. The default, `Screenshot {date} at {time}`, gives `Screenshot 2026-11-12 at 14-05-09.png`. A name that's taken gets ` 2`, ` 3`… added; nothing is overwritten.
 - **Keep**: how many saved screenshots to keep, 200 by default. On each new capture the oldest beyond that are deleted; 0 keeps them all. Only files snipno saved itself are deleted (they're listed in `history.json` next to the config), so pointing the folder at your Desktop is safe.
-
-## Upload and copy the link
-
-snipno can also upload a capture and put its link on the clipboard instead of the image. It works with most self-hosted image hosts (the ShareX "custom uploader" style). Set it up in **Settings → Upload**:
-
-- **Upload URL**: the endpoint. The PNG is POSTed as multipart form data in the `file` field.
-- **API token**: sent as `Authorization: Bearer <token>`.
-- **File name**: what the image is called on the server, `.png` added. `{date}`, `{time}` and `{timestamp}` (Unix seconds) are filled in, so `screenshot-{date}-{time}` (the default) gives `screenshot-2026-11-12-14-05-09.png`. Leave it empty for just the date and time.
-- **Labels**: comma-separated, sent as the `tags` field. You can also edit them in the overlay before each upload.
-- **Extra fields**: more form fields, `key=value&key=value`.
-- **Link**: how to build the link from the JSON response, with `{json:path}` placeholders (`{response}` is the raw body). Leave it empty to use the response's `url` or `link` field.
-
-Then switch on the **Upload** button in the overlay's toolbar (or press `⌘U` there) before you select; the labels field appears under the toolbar. Saved screenshots can also be uploaded later from **Recent screenshots**. The overlay closes right away; a notification tells you when the link is copied or why the upload failed. Links are remembered with their screenshot, so **Recent screenshots** can copy them again. The request is made by macOS's `curl`, with the token passed on stdin so it never appears in the process list. The token is stored in the config file in plain text.
-
-For an imgstore instance:
-
-| Field | Value |
-|---|---|
-| Upload URL | `https://img.example.com/api/images` |
-| Extra fields | `isPublic=true` |
-| Link | `https://img.example.com/i/{json:images[0].slug}` |
-
-`snipno upload <file.png> [--labels a,b]` uploads a file from the terminal with the same settings (add `--temp` to delete the file afterwards).
 
 ## How it's built
 
@@ -74,7 +50,7 @@ One binary, three modes:
 
 - `snipno` (daemon, `src/daemon.rs`): runs a tao event loop with the menu bar icon (`tray-icon`) and the global hotkey (`global-hotkey`). It runs the other two modes as child processes.
 - `snipno capture [--monitor <id>]` (`src/overlay.rs`): the daemon starts one per display (`snipno monitors` lists the ids). The display under the cursor starts last, so it gets keyboard focus. When one overlay copies or cancels, the daemon closes the rest. Each overlay captures its own display with `xcap` before its own window exists. It then shows that image in a borderless eframe window raised above the menu bar (`src/macos.rs`).
-- `snipno settings` (`src/settings.rs`): records the capture hotkey and the tool keys, and sets up saving and uploading. It reports back to the daemon over stdout: while it records, the daemon pauses the global hotkey, and after a save the daemon reloads the config.
+- `snipno settings` (`src/settings.rs`): records the capture hotkey and the tool keys, and sets up saving. It reports back to the daemon over stdout: while it records, the daemon pauses the global hotkey, and after a save the daemon reloads the config.
 
 Smart selection (`src/snap.rs`) combines the window list with long straight edges found in the screenshot, so hovering highlights panels and cards as well as whole windows. It deliberately ignores small controls such as buttons and text fields, since you usually want the block around them.
 

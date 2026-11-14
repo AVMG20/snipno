@@ -14,8 +14,6 @@ pub struct Config {
     pub tool_keys: ToolKeys,
     /// Keeping a copy of every capture in a folder.
     pub save: Save,
-    /// Where the overlay's upload button sends screenshots.
-    pub upload: Upload,
 }
 
 impl Default for Config {
@@ -24,7 +22,6 @@ impl Default for Config {
             hotkey: DEFAULT_HOTKEY.to_string(),
             tool_keys: ToolKeys::default(),
             save: Save::default(),
-            upload: Upload::default(),
         }
     }
 }
@@ -37,7 +34,7 @@ pub struct Save {
     pub enabled: bool,
     /// Folder to save in; `~` is your home folder. Empty means [`default_folder`].
     pub folder: String,
-    /// File name template, same placeholders as the upload name.
+    /// File name template: `{date}`, `{time}` and `{timestamp}` are filled in, `.png` added.
     pub name: String,
     /// How many saved screenshots to keep; older ones are deleted. 0 keeps them all.
     pub keep: u32,
@@ -142,48 +139,6 @@ impl ToolKeys {
     }
 }
 
-/// A ShareX-style custom uploader: the screenshot is POSTed as multipart form data (field
-/// `file`), and the link is read from the JSON response.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct Upload {
-    /// Endpoint, e.g. `https://img.example.com/api/images`. Empty disables uploading.
-    pub url: String,
-    /// Sent as `Authorization: Bearer <token>` when set.
-    pub token: String,
-    /// Comma-separated labels, sent as the `tags` form field. Editable per capture.
-    pub labels: String,
-    /// Extra form fields, `key=value&key=value` (e.g. `isPublic=true`).
-    pub fields: String,
-    /// Link template with `{json:path}` placeholders, e.g.
-    /// `https://img.example.com/i/{json:images[0].slug}`. Empty: use the response's `url`/`link`.
-    pub link: String,
-    /// File name the image is uploaded as, `.png` added; `{date}`, `{time}` and `{timestamp}`
-    /// are filled in. Empty means `{date}-{time}`.
-    pub name: String,
-}
-
-pub const DEFAULT_UPLOAD_NAME: &str = "screenshot-{date}-{time}";
-
-impl Default for Upload {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            token: String::new(),
-            labels: String::new(),
-            fields: String::new(),
-            link: String::new(),
-            name: DEFAULT_UPLOAD_NAME.into(),
-        }
-    }
-}
-
-impl Upload {
-    pub fn enabled(&self) -> bool {
-        !self.url.trim().is_empty()
-    }
-}
-
 pub fn path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -197,6 +152,18 @@ pub fn load() -> Config {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Older versions stored upload settings, including an API token in plain text. Rewrite the
+/// config without them; called once when the daemon starts.
+pub fn drop_old_settings() {
+    let Ok(text) = fs::read_to_string(path()) else { return };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&text) else { return };
+    if map.contains_key("upload") {
+        if let Ok(config) = serde_json::from_str::<Config>(&text) {
+            let _ = save(&config);
+        }
+    }
 }
 
 pub fn save(config: &Config) -> io::Result<()> {

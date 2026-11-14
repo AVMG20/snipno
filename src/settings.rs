@@ -1,5 +1,5 @@
-//! `snipno settings`: record the global hotkey and the overlay's tool shortcuts, choose where
-//! captures are saved, and set up where the overlay's upload button sends them.
+//! `snipno settings`: record the global hotkey and the overlay's tool shortcuts, and choose
+//! whether and where captures are saved.
 //! Tells the daemon over stdout to pause the hotkey while recording and to reload after a save
 //! (see `daemon::MSG_*`).
 
@@ -71,10 +71,9 @@ enum Target {
 enum Tab {
     Shortcuts,
     Saving,
-    Upload,
 }
 
-const TABS: [(Tab, &str); 3] = [(Tab::Shortcuts, "Shortcuts"), (Tab::Saving, "Saving"), (Tab::Upload, "Upload")];
+const TABS: [(Tab, &str); 2] = [(Tab::Shortcuts, "Shortcuts"), (Tab::Saving, "Saving")];
 
 struct Settings {
     config: config::Config,
@@ -145,7 +144,7 @@ impl Settings {
         });
     }
 
-    /// Save after editing a saving or upload setting; the daemon reloads to update the menu.
+    /// Save after editing a saving setting; the daemon reloads to update the menu.
     fn save_and_reload(&mut self) {
         self.status = Some(match config::save(&self.config) {
             Ok(()) => {
@@ -324,51 +323,6 @@ impl Settings {
         });
     }
 
-    fn destination_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.label(RichText::new("Destination").size(13.5).color(theme::TEXT));
-            ui.label(
-                RichText::new("Sent as multipart form data, image in the file field.").size(12.0).color(theme::MUTED),
-            );
-            ui.add_space(6.0);
-            let up = &mut self.config.upload;
-            let mut changed = false;
-            changed |= field(ui, "Upload URL", "https://img.example.com/api/images", &mut up.url, false);
-            changed |= field(ui, "API token", "sent as Authorization: Bearer …", &mut up.token, true);
-            changed |= field(ui, "File name", "{date}-{time}  ·  also {timestamp}", &mut up.name, false);
-            changed |= field(ui, "Labels", "comma, separated (sent as tags)", &mut up.labels, false);
-            changed |= field(ui, "Extra fields", "isPublic=true&key=value", &mut up.fields, false);
-            changed |= field(
-                ui,
-                "Link",
-                "…/i/{json:images[0].slug} (empty: the response's url)",
-                &mut up.link,
-                false,
-            );
-            if changed {
-                self.save_and_reload();
-            }
-        });
-    }
-
-    fn upload_how_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.label(RichText::new("Uploading a capture").size(13.5).color(theme::TEXT));
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let text = |t: &str| RichText::new(t).size(12.0).color(theme::MUTED);
-                ui.label(text("Switch on the upload button in the overlay's toolbar, or press"));
-                theme::kbd(ui, "⌘U", 11.0);
-                ui.label(text(
-                    "there, and the capture is uploaded and its link copied. Saved screenshots can \
-                     also be uploaded later from Recent screenshots in the menu bar menu.",
-                ));
-            });
-        });
-    }
-
     fn saving_card(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
@@ -395,7 +349,7 @@ impl Settings {
             ui.add_enabled_ui(enabled, |ui| {
                 let save = &mut self.config.save;
                 let default = config::tilde(&config::default_folder());
-                changed |= field(ui, "Folder", &default, &mut save.folder, false);
+                changed |= field(ui, "Folder", &default, &mut save.folder);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let choose = ui.add_enabled(self.picking.is_none(), small_ghost_button("Choose…"));
@@ -413,7 +367,7 @@ impl Settings {
                     }
                 });
 
-                changed |= field(ui, "File name", "{date}-{time}  ·  also {timestamp}", &mut save.name, false);
+                changed |= field(ui, "File name", "{date}-{time}  ·  also {timestamp}", &mut save.name);
                 ui.label(
                     RichText::new(format!("For example {}", store::file_name(&save.name, chrono::Local::now())))
                         .size(11.5)
@@ -524,13 +478,12 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A labelled single-line text field. Returns whether the text changed.
-fn field(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, password: bool) -> bool {
+fn field(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String) -> bool {
     ui.add_space(6.0);
     ui.label(RichText::new(label).size(12.0).color(theme::MUTED));
     ui.add(
         egui::TextEdit::singleline(value)
             .hint_text(RichText::new(hint).color(theme::FAINT))
-            .password(password)
             .desired_width(f32::INFINITY)
             .font(FontId::proportional(13.0))
             .background_color(theme::SURFACE_HI)
@@ -671,11 +624,6 @@ impl eframe::App for Settings {
                         self.tools_card(ui);
                     }
                     Tab::Saving => self.saving_card(ui),
-                    Tab::Upload => {
-                        self.destination_card(ui);
-                        ui.add_space(12.0);
-                        self.upload_how_card(ui);
-                    }
                 }
                 ui.add_space(10.0);
                 self.status(ui);

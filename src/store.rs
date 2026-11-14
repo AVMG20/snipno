@@ -1,7 +1,7 @@
 //! Saved screenshots and the history behind "Recent screenshots" in the menu bar menu.
 //!
 //! Every capture can be written to a folder (Settings → Saving). The history file next to the
-//! config lists what snipno saved and uploaded, newest first. Clean-up only ever deletes files
+//! config lists what snipno saved, newest first. Clean-up only ever deletes files
 //! listed there, so pointing the folder at the Desktop or an existing folder never touches
 //! anything else in it.
 
@@ -14,7 +14,7 @@ use std::{
 };
 use xcap::image::RgbaImage;
 
-/// One capture: the saved file, the uploaded link, or both.
+/// One saved capture. Entries whose file is gone have `file: None` until the next clean-up.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct Entry {
@@ -22,7 +22,6 @@ pub struct Entry {
     /// Size of `file` when it was saved. Clean-up only deletes a file that still has this size,
     /// so a file someone else put at the same path later is left alone.
     pub size: Option<u64>,
-    pub link: Option<String>,
     /// Unix seconds.
     pub time: i64,
 }
@@ -33,9 +32,6 @@ impl Entry {
         self.file.as_deref().filter(|f| f.is_file())
     }
 }
-
-/// Entries without a saved file (uploads with saving off) kept in the history.
-const LINKS_KEPT: usize = 50;
 
 pub fn history_path() -> PathBuf {
     config::path().with_file_name("history.json")
@@ -56,18 +52,16 @@ fn read_history() -> io::Result<Option<Vec<Entry>>> {
     Ok(parse_history(&text))
 }
 
-/// Reads the older list-of-links format too.
+/// The older format, a list of uploaded links, holds no files: it reads as empty.
 pub fn parse_history(text: &str) -> Option<Vec<Entry>> {
     if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(text) {
         return Some(entries);
     }
-    serde_json::from_str::<Vec<String>>(text)
-        .map(|links| links.into_iter().map(|l| Entry { link: Some(l), ..Entry::default() }).collect())
-        .ok()
+    serde_json::from_str::<Vec<String>>(text).map(|_| Vec::new()).ok()
 }
 
-/// Change the history under a lock, so the overlay and uploads finishing at the same moment
-/// don't undo each other's changes. Files the change gave up on are deleted afterwards.
+/// Change the history under a lock, so overlays saving at the same moment don't undo each
+/// other's changes. Files the change gave up on are deleted afterwards.
 fn update(change: impl FnOnce(&mut Vec<Entry>) -> Vec<(PathBuf, Option<u64>)>) -> io::Result<()> {
     let path = history_path();
     if let Some(dir) = path.parent() {
@@ -115,26 +109,20 @@ fn write_history(entries: &[Entry]) -> io::Result<()> {
 }
 
 /// Trim the history: saved files beyond the newest `keep` (0: no limit) are returned for
-/// deletion with their recorded size and dropped, as are link-only entries beyond
-/// [`LINKS_KEPT`].
+/// deletion with their recorded size, and dropped along with entries whose file is gone.
 pub fn prune(entries: &mut Vec<Entry>, keep: u32) -> Vec<(PathBuf, Option<u64>)> {
     let mut doomed = Vec::new();
-    let (mut files, mut links) = (0usize, 0usize);
+    let mut files = 0usize;
     entries.retain_mut(|e| {
-        if e.file.is_some() {
-            files += 1;
-            if keep > 0 && files > keep as usize {
-                doomed.extend(e.file.take().map(|f| (f, e.size.take())));
-            }
-        }
-        if e.file.is_some() {
-            return true;
-        }
-        if e.link.is_none() {
+        if e.file.is_none() {
             return false;
         }
-        links += 1;
-        links <= LINKS_KEPT
+        files += 1;
+        if keep > 0 && files > keep as usize {
+            doomed.extend(e.file.take().map(|f| (f, e.size.take())));
+            return false;
+        }
+        true
     });
     doomed
 }
@@ -167,7 +155,7 @@ pub fn save(image: &RgbaImage, cfg: &Save) -> Result<PathBuf, Box<dyn Error>> {
         return Err(e);
     }
     let size = fs::metadata(&path).map(|m| m.len()).ok();
-    let entry = Entry { file: Some(path.clone()), size, link: None, time: now.timestamp() };
+    let entry = Entry { file: Some(path.clone()), size, time: now.timestamp() };
     let result = update(|entries| {
         // A path can come round again (a fixed name, after the old file was moved away).
         for e in entries.iter_mut().filter(|e| e.file.as_deref() == Some(&path)) {
@@ -182,20 +170,6 @@ pub fn save(image: &RgbaImage, cfg: &Save) -> Result<PathBuf, Box<dyn Error>> {
         eprintln!("snipno: could not update the screenshot history: {e}");
     }
     Ok(path)
-}
-
-/// Remember the link an upload of `file` got: on that file's entry, or as a new one.
-pub fn add_link(file: Option<&Path>, link: &str) -> io::Result<()> {
-    update(|entries| {
-        match entries.iter_mut().find(|e| file.is_some() && e.file.as_deref() == file) {
-            Some(e) => e.link = Some(link.to_string()),
-            None => entries.insert(
-                0,
-                Entry { link: Some(link.to_string()), time: chrono::Local::now().timestamp(), ..Entry::default() },
-            ),
-        }
-        prune(entries, 0)
-    })
 }
 
 /// A new file `name` in `dir`, or `name 2.png`, `name 3.png`… if that's taken.
@@ -237,7 +211,7 @@ pub fn file_name(template: &str, now: chrono::DateTime<chrono::Local>) -> String
         .replace("{date}", &now.format("%Y-%m-%d").to_string())
         .replace("{time}", &now.format("%H-%M-%S").to_string())
         .replace("{timestamp}", &now.timestamp().to_string());
-    // `/` and `:` mean folders to some servers; quotes and `;` would break the form header.
+    // `/` would mean a folder, `:` shows as `/` in Finder; keep names to one plain file.
     let name: String = name
         .chars()
         .map(|c| if c.is_control() || "/\\:\";".contains(c) { '-' } else { c })
@@ -259,11 +233,7 @@ mod tests {
     }
 
     fn file(n: u32) -> Entry {
-        Entry { file: Some(PathBuf::from(format!("/shots/{n}.png"))), size: Some(n as u64), link: None, time: n as i64 }
-    }
-
-    fn link(n: u32) -> Entry {
-        Entry { link: Some(format!("https://x/{n}")), time: n as i64, ..Entry::default() }
+        Entry { file: Some(PathBuf::from(format!("/shots/{n}.png"))), size: Some(n as u64), time: n as i64 }
     }
 
     #[test]
@@ -280,20 +250,12 @@ mod tests {
     }
 
     #[test]
-    fn prune_deletes_saved_files_beyond_the_limit_but_keeps_their_links() {
+    fn prune_deletes_saved_files_beyond_the_limit() {
         let mut entries: Vec<Entry> = (1..=5).rev().map(file).collect();
-        entries[4].link = Some("https://x/oldest".into());
-        let doomed = prune(&mut entries, 3);
+        entries[1].file = None; // moved away in Finder
+        let doomed = prune(&mut entries, 2);
         assert_eq!(doomed, [(PathBuf::from("/shots/2.png"), Some(2)), (PathBuf::from("/shots/1.png"), Some(1))]);
-        assert_eq!(entries.len(), 4, "the oldest keeps its link, the file-only one goes");
-        assert_eq!(entries[3], Entry { link: Some("https://x/oldest".into()), time: 1, ..Entry::default() });
-    }
-
-    #[test]
-    fn dropped_files_dont_count_towards_the_link_cap() {
-        let mut entries: Vec<Entry> = (1..=100).rev().map(file).chain((1..=10).rev().map(link)).collect();
-        assert_eq!(prune(&mut entries, 1).len(), 99);
-        assert_eq!(entries.len(), 11, "one file and all ten links");
+        assert_eq!(entries, [file(5), file(3)]);
     }
 
     #[test]
@@ -311,16 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn prune_with_zero_keeps_every_file_and_caps_link_only_entries() {
+    fn prune_with_zero_keeps_every_file() {
         let mut entries: Vec<Entry> = (1..=300).rev().map(file).collect();
         assert!(prune(&mut entries, 0).is_empty());
         assert_eq!(entries.len(), 300);
-
-        let mut entries: Vec<Entry> = (1..=60).rev().map(link).chain([file(0)]).collect();
-        assert!(prune(&mut entries, 200).is_empty());
-        assert_eq!(entries.len(), LINKS_KEPT + 1);
-        assert_eq!(entries[0].link.as_deref(), Some("https://x/60"));
-        assert!(entries.last().unwrap().file.is_some());
     }
 
     #[test]
@@ -337,13 +293,10 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_old_list_of_links() {
-        let old = parse_history(r#"["https://x/1","https://x/2"]"#).unwrap();
-        assert_eq!(old.len(), 2);
-        assert_eq!(old[1].link.as_deref(), Some("https://x/2"));
-        let e = parse_history(r#"[{"file":"/a.png","time":5}]"#).unwrap();
+    fn reads_the_history_and_the_old_list_of_links() {
+        assert_eq!(parse_history(r#"["https://x/1","https://x/2"]"#), Some(Vec::new()));
+        let e = parse_history(r#"[{"file":"/a.png","link":"https://x/1","time":5}]"#).unwrap();
         assert_eq!(e[0].file.as_deref(), Some(Path::new("/a.png")));
-        assert_eq!(e[0].link, None);
         assert!(parse_history("{not json").is_none());
     }
 }

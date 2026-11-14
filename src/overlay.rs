@@ -1,7 +1,6 @@
 //! `snipno capture`: freezes the screen under the cursor, shows it full-screen with a drawing
-//! toolbar on top, and copies the selected region (annotations included) to the clipboard, or
-//! uploads it when the toolbar's upload button is on. Either way a copy goes to the screenshots
-//! folder if saving is on.
+//! toolbar on top, and copies the selected region (annotations included) to the clipboard. A
+//! copy also goes to the screenshots folder if saving is on.
 
 use crate::{
     adjust::{self, Grip},
@@ -11,7 +10,6 @@ use crate::{
     snap::{self, Snap},
     store, theme,
     toolbar::{self, Action},
-    upload,
 };
 use eframe::egui::{
     self, Color32, CursorIcon, Event, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureFilter,
@@ -84,8 +82,8 @@ pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
         ..Default::default()
     };
 
-    // Saving and starting uploads run off the UI thread so the overlay closes at once; the
-    // process waits for them before it exits.
+    // Saving runs off the UI thread so the overlay closes at once; the process waits for it
+    // before it exits.
     let jobs: Jobs = Arc::default();
     let overlay_jobs = jobs.clone();
     let result = eframe::run_native(
@@ -161,12 +159,6 @@ struct Overlay {
     hover: Hover,
     /// Saving to the screenshots folder, when it's on.
     save: Option<Save>,
-    /// Upload settings are filled in, so the toolbar offers uploading.
-    can_upload: bool,
-    /// Upload is switched on for this capture: the labels to send, editable in the overlay.
-    /// `None` copies the image.
-    labels: Option<String>,
-    default_labels: String,
     jobs: Jobs,
     /// Block-averaged screenshot for pixelate boxes, with its texture; made on first use.
     mosaic: Option<(Mosaic, TextureHandle)>,
@@ -276,30 +268,6 @@ fn dashed_outline(painter: &egui::Painter, r: Rect, kind: StrokeKind) {
     painter.extend(egui::Shape::dashed_line(&path, Stroke::new(WIDTH, theme::ACCENT), DASH, GAP));
 }
 
-/// After a capture, off the UI thread: save it to the screenshots folder, then hand it to a
-/// detached `snipno upload` if upload was on. Without a saved copy the upload gets a temporary
-/// PNG, which it deletes when done.
-fn save_and_upload(image: RgbaImage, save: Option<Save>, labels: Option<String>) {
-    let saved = save.and_then(|cfg| {
-        store::save(&image, &cfg).map_err(|e| eprintln!("snipno: could not save the screenshot: {e}")).ok()
-    });
-    let Some(labels) = labels else { return };
-    let result: Result<(), Box<dyn Error>> = match saved {
-        Some(path) => upload::spawn(&path, Some(&labels), false).map_err(Into::into),
-        None => temp_png(&image).and_then(|path| Ok(upload::spawn(&path, Some(&labels), true)?)),
-    };
-    if let Err(e) = result {
-        eprintln!("snipno: upload failed: {e}");
-    }
-}
-
-fn temp_png(image: &RgbaImage) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
-    let (path, file) = store::create_unique(&std::env::temp_dir(), &format!("snipno-{stamp}.png"))?;
-    store::write_png(image, file)?;
-    Ok(path)
-}
-
 /// Even with vsync off, the screen shows a pointer sample ~2 frames late while the hardware
 /// cursor is instant, so straight shapes visibly trail it. Draw their live end where the cursor
 /// will be ~one frame from now. Display only: the real shape keeps the real point, so the
@@ -379,9 +347,6 @@ impl Overlay {
                 scroll: 0.0,
             },
             save: cfg.save.enabled.then_some(cfg.save),
-            can_upload: cfg.upload.enabled(),
-            labels: None,
-            default_labels: cfg.upload.labels,
             jobs,
             mosaic: None,
         }
@@ -411,40 +376,28 @@ impl Overlay {
     fn copy_and_close(&mut self, ctx: &egui::Context, selection: Rect, screen: Rect) {
         let mosaic = self.mosaic.as_ref().map(|(m, _)| m);
         let image = annotate::render(&self.shot, &self.shapes, self.scale(screen), selection, mosaic);
-        // Uploading puts the link on the clipboard once it's done; otherwise the image goes there.
-        if self.labels.is_none() {
-            let (w, h) = image.dimensions();
-            let result = arboard::Clipboard::new().and_then(|mut cb| {
-                cb.set_image(arboard::ImageData {
-                    width: w as usize,
-                    height: h as usize,
-                    bytes: Cow::Borrowed(image.as_raw()),
-                })
-            });
-            if let Err(e) = result {
-                eprintln!("snipno: copying to clipboard failed: {e}");
-            }
+        let (w, h) = image.dimensions();
+        let result = arboard::Clipboard::new().and_then(|mut cb| {
+            cb.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: Cow::Borrowed(image.as_raw()),
+            })
+        });
+        if let Err(e) = result {
+            eprintln!("snipno: copying to clipboard failed: {e}");
         }
-        if self.save.is_some() || self.labels.is_some() {
-            let (save, labels) = (self.save.clone(), self.labels.clone());
-            let job = std::thread::spawn(move || save_and_upload(image, save, labels));
+        if let Some(save) = self.save.clone() {
+            let job = std::thread::spawn(move || {
+                if let Err(e) = store::save(&image, &save) {
+                    eprintln!("snipno: could not save the screenshot: {e}");
+                }
+            });
             if let Ok(mut jobs) = self.jobs.lock() {
                 jobs.push(job);
             }
         }
         self.close(ctx);
-    }
-
-    /// Switch between copying the capture and uploading it.
-    fn toggle_upload(&mut self) {
-        if !self.can_upload {
-            return;
-        }
-        self.labels = match self.labels.take() {
-            Some(_) => None,
-            None => Some(self.default_labels.clone()),
-        };
-        self.opened = Instant::now(); // show the hint again: it says what a click does now
     }
 
     fn close(&mut self, ctx: &egui::Context) {
@@ -453,14 +406,6 @@ impl Overlay {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context, screen: Rect) {
-        // ⌘U works while typing labels too, so upload can be switched off from there.
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::U)) {
-            self.toggle_upload();
-            return;
-        }
-        if ctx.egui_wants_keyboard_input() {
-            return; // typing labels: keys are text, not shortcuts
-        }
         let keys = &self.tool_keys;
         let (esc, undo, enter, tool) = ctx.input(|i| {
             // Tool shortcuts from the config (S/P/A/R/E unless changed in Settings).
@@ -848,12 +793,7 @@ impl eframe::App for Overlay {
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         self.paint(ui.painter(), screen, pointer);
         if self.adjusting.is_some() {
-            let text = if self.labels.is_some() {
-                "Release ⌘ to upload  ·  drag to move or resize  ·"
-            } else {
-                "Release ⌘ to copy  ·  drag to move or resize  ·"
-            };
-            toolbar::hint(&ctx, text, "⌘Z", 1.0);
+            toolbar::hint(&ctx, "Release ⌘ to copy  ·  drag to move or resize  ·", "⌘Z", 1.0);
             return;
         }
         if self.selecting.is_some() || self.drawing.is_some() {
@@ -867,7 +807,6 @@ impl eframe::App for Overlay {
                 color: &mut self.color,
                 width: &mut self.width,
                 can_undo: !self.shapes.is_empty(),
-                upload: self.can_upload.then_some(self.labels.is_some()),
                 keys: &self.tool_keys,
             },
         );
@@ -876,20 +815,13 @@ impl eframe::App for Overlay {
                 self.shapes.pop();
             }
             Some(Action::FullScreen) => self.copy_and_close(&ctx, screen, screen),
-            Some(Action::ToggleUpload) => self.toggle_upload(),
             Some(Action::Close) => self.close(&ctx),
             None => {}
         }
 
         let age = self.opened.elapsed().as_secs_f32();
         let opacity = (1.0 - (age - HINT_SECS) / 0.4).clamp(0.0, 1.0);
-        if let Some(labels) = &mut self.labels {
-            toolbar::labels_field(&ctx, labels);
-        }
         let text = match self.tool {
-            Tool::Select if self.labels.is_some() => {
-                "Click to upload the highlight, drag for your own, scroll to resize  ·".to_string()
-            }
             Tool::Select => "Click to capture the highlight, drag for your own, scroll to resize  ·".to_string(),
             tool => {
                 let what = match tool {
@@ -897,8 +829,7 @@ impl eframe::App for Overlay {
                     Tool::Pixelate => "Drag over anything private",
                     _ => "Draw",
                 };
-                let verb = if self.labels.is_some() { "upload" } else { "capture" };
-                format!("{what}, then press {} and drag to {verb}  ·", hotkey::pretty(self.tool_keys.get(Tool::Select)))
+                format!("{what}, then press {} and drag to capture  ·", hotkey::pretty(self.tool_keys.get(Tool::Select)))
             }
         };
         toolbar::hint(&ctx, &text, "Esc", opacity);

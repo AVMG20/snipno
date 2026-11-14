@@ -6,7 +6,7 @@
 //! the hotkey is only paused while a new one is actually being recorded and a saved hotkey takes
 //! effect immediately — not when the window closes.
 
-use crate::{config, hotkey, icon, store, upload};
+use crate::{config, hotkey, icon, store};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use std::{
     error::Error,
@@ -28,7 +28,7 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
 };
 
-/// How often the daemon checks whether a capture or upload changed the history.
+/// How often the daemon checks whether a capture changed the history.
 const HISTORY_POLL: Duration = Duration::from_secs(2);
 
 /// Lines the settings process prints to stdout.
@@ -107,15 +107,13 @@ const RECENT_SHOWN: usize = 10;
 
 enum RecentAction {
     CopyImage(PathBuf),
-    CopyLink(String),
-    Upload(PathBuf),
     Reveal(PathBuf),
     OpenFolder,
 }
 
-/// "Recent screenshots" submenu: the last few captures, each with a submenu to copy the image or
-/// its link again, upload it, or show it in Finder. Captures and uploads write the history file;
-/// the daemon picks up changes by its modified time.
+/// "Recent screenshots" submenu: the last few saved captures, each with a submenu to copy the
+/// image again or show it in Finder. Captures write the history file; the daemon picks up changes
+/// by its modified time.
 struct Recent {
     menu: Submenu,
     actions: Vec<(MenuId, RecentAction)>,
@@ -141,40 +139,28 @@ impl Recent {
         self.seen = modified;
         while self.menu.remove_at(0).is_some() {}
         self.actions.clear();
-        self.shown.clear();
 
         let cfg = config::load();
-        let entries: Vec<store::Entry> = store::history()
+        let entries: Vec<PathBuf> = store::history()
             .into_iter()
-            .filter(|e| e.existing_file().is_some() || e.link.is_some())
+            .filter_map(|e| e.existing_file().map(Path::to_path_buf))
             .take(RECENT_SHOWN)
             .collect();
-        for entry in &entries {
-            let sub = Submenu::new(entry_label(entry), true);
-            let file = entry.existing_file().map(Path::to_path_buf);
-            self.shown.extend(file.clone());
-            let actions = &mut self.actions;
-            if let Some(file) = &file {
-                add(actions, &sub, "Copy image", RecentAction::CopyImage(file.clone()));
-            }
-            if let Some(link) = &entry.link {
-                add(actions, &sub, "Copy link", RecentAction::CopyLink(link.clone()));
-            }
-            if let Some(file) = &file {
-                if entry.link.is_none() && cfg.upload.enabled() {
-                    add(actions, &sub, "Upload and copy link", RecentAction::Upload(file.clone()));
-                }
-                add(actions, &sub, "Show in Finder", RecentAction::Reveal(file.clone()));
-            }
+        for file in &entries {
+            let name = file.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let sub = Submenu::new(name, true);
+            add(&mut self.actions, &sub, "Copy image", RecentAction::CopyImage(file.clone()));
+            add(&mut self.actions, &sub, "Show in Finder", RecentAction::Reveal(file.clone()));
             let _ = self.menu.append(&sub);
         }
+        self.shown = entries;
         if cfg.save.enabled {
-            if !entries.is_empty() {
+            if !self.shown.is_empty() {
                 let _ = self.menu.append(&PredefinedMenuItem::separator());
             }
             add(&mut self.actions, &self.menu, "Open screenshots folder", RecentAction::OpenFolder);
         }
-        self.menu.set_enabled(!entries.is_empty() || cfg.save.enabled);
+        self.menu.set_enabled(!self.shown.is_empty() || cfg.save.enabled);
     }
 
     /// Run the action behind a clicked menu item; false if the item isn't one of ours.
@@ -189,16 +175,6 @@ impl Recent {
                         eprintln!("snipno: copying {} failed: {e}", file.display());
                     }
                 });
-            }
-            RecentAction::CopyLink(link) => {
-                if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(link.clone())) {
-                    eprintln!("snipno: copying the link failed: {e}");
-                }
-            }
-            RecentAction::Upload(file) => {
-                if let Err(e) = upload::spawn(file, None, false) {
-                    eprintln!("snipno: could not start the upload: {e}");
-                }
             }
             RecentAction::Reveal(file) => open(&[std::ffi::OsStr::new("-R"), file.as_os_str()]),
             RecentAction::OpenFolder => {
@@ -238,30 +214,8 @@ fn open(args: &[&std::ffi::OsStr]) {
     }
 }
 
-/// A capture in the menu: its file name, or the link if only that is left.
-fn entry_label(entry: &store::Entry) -> String {
-    match (entry.existing_file().and_then(Path::file_stem), &entry.link) {
-        (Some(name), _) => name.to_string_lossy().into_owned(),
-        (None, Some(link)) => menu_label(link),
-        (None, None) => "Screenshot".into(),
-    }
-}
-
-/// A link as a menu item: without the scheme, long ones cut in the middle so the end (usually
-/// the image's id) stays visible.
-fn menu_label(link: &str) -> String {
-    const MAX: usize = 48;
-    let s = link.trim_start_matches("https://").trim_start_matches("http://");
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= MAX {
-        return s.to_string();
-    }
-    let head: String = chars[..MAX / 2].iter().collect();
-    let tail: String = chars[chars.len() - (MAX / 2 - 1)..].iter().collect();
-    format!("{head}…{tail}")
-}
-
 pub fn run() -> Result<(), Box<dyn Error>> {
+    config::drop_old_settings();
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
@@ -303,7 +257,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
-        // Wake up now and then to pick up new captures and finished uploads.
+        // Wake up now and then to pick up new captures.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + HISTORY_POLL);
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => recent.refresh(false),
@@ -374,7 +328,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     SettingsMsg::Resume => hotkeys.apply_config(&capture_item),
                     SettingsMsg::Reload => {
                         hotkeys.apply_config(&capture_item);
-                        // Saving or uploading may have been switched on or off.
+                        // Saving may have been switched on or off.
                         recent.refresh(true);
                     }
                     SettingsMsg::Closed => {
@@ -512,14 +466,5 @@ mod tests {
         assert_eq!(SettingsMsg::parse(MSG_RESUME), Some(SettingsMsg::Resume));
         assert_eq!(SettingsMsg::parse(MSG_RELOAD), Some(SettingsMsg::Reload));
         assert_eq!(SettingsMsg::parse("snipno: snapshot saved"), None);
-    }
-
-    #[test]
-    fn menu_labels_drop_the_scheme_and_keep_the_end_of_long_links() {
-        assert_eq!(menu_label("https://img.example.com/i/abc"), "img.example.com/i/abc");
-        let long = format!("https://img.example.com/{}/xyz123", "a".repeat(60));
-        let label = menu_label(&long);
-        assert_eq!(label.chars().count(), 48);
-        assert!(label.starts_with("img.example.com/") && label.ends_with("/xyz123"), "{label}");
     }
 }

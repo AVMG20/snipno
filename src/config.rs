@@ -12,13 +12,79 @@ pub struct Config {
     pub hotkey: String,
     /// Keys that pick a tool inside the capture overlay.
     pub tool_keys: ToolKeys,
-    /// Where "capture and upload" sends screenshots.
+    /// Keeping a copy of every capture in a folder.
+    pub save: Save,
+    /// Where the overlay's upload button sends screenshots.
     pub upload: Upload,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { hotkey: DEFAULT_HOTKEY.to_string(), tool_keys: ToolKeys::default(), upload: Upload::default() }
+        Self {
+            hotkey: DEFAULT_HOTKEY.to_string(),
+            tool_keys: ToolKeys::default(),
+            save: Save::default(),
+            upload: Upload::default(),
+        }
+    }
+}
+
+/// Every capture is also written to a folder as a PNG, and listed under "Recent screenshots" in
+/// the menu bar menu. Only files snipno saved itself are ever cleaned up.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Save {
+    pub enabled: bool,
+    /// Folder to save in; `~` is your home folder. Empty means [`default_folder`].
+    pub folder: String,
+    /// File name template, same placeholders as the upload name.
+    pub name: String,
+    /// How many saved screenshots to keep; older ones are deleted. 0 keeps them all.
+    pub keep: u32,
+}
+
+pub const DEFAULT_SAVE_NAME: &str = "Screenshot {date} at {time}";
+pub const DEFAULT_KEEP: u32 = 200;
+
+impl Default for Save {
+    fn default() -> Self {
+        Self { enabled: true, folder: String::new(), name: DEFAULT_SAVE_NAME.into(), keep: DEFAULT_KEEP }
+    }
+}
+
+impl Save {
+    /// The folder screenshots go to, with `~` expanded.
+    pub fn folder_path(&self) -> PathBuf {
+        let folder = self.folder.trim();
+        if folder.is_empty() {
+            return default_folder();
+        }
+        let home = dirs::home_dir().unwrap_or_default();
+        match folder.strip_prefix('~') {
+            Some("") => home,
+            Some(rest) if rest.starts_with('/') => home.join(&rest[1..]),
+            _ if PathBuf::from(folder).is_absolute() => PathBuf::from(folder),
+            _ => home.join(folder),
+        }
+    }
+}
+
+/// `~/Pictures/snipno`.
+pub fn default_folder() -> PathBuf {
+    dirs::picture_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("snipno")
+}
+
+/// `path` with the home folder shown as `~`.
+pub fn tilde(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    match dirs::home_dir() {
+        Some(home) if path.starts_with(&home) => {
+            format!("~{}", s.strip_prefix(&home.display().to_string()).unwrap_or(&s))
+        }
+        _ => s,
     }
 }
 
@@ -81,8 +147,6 @@ impl ToolKeys {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Upload {
-    /// Global hotkey for capture-and-upload; empty means none.
-    pub hotkey: String,
     /// Endpoint, e.g. `https://img.example.com/api/images`. Empty disables uploading.
     pub url: String,
     /// Sent as `Authorization: Bearer <token>` when set.
@@ -104,7 +168,6 @@ pub const DEFAULT_UPLOAD_NAME: &str = "screenshot-{date}-{time}";
 impl Default for Upload {
     fn default() -> Self {
         Self {
-            hotkey: String::new(),
             url: String::new(),
             token: String::new(),
             labels: String::new(),

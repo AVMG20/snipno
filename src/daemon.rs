@@ -6,11 +6,12 @@
 //! the hotkey is only paused while a new one is actually being recorded and a saved hotkey takes
 //! effect immediately — not when the window closes.
 
-use crate::{config, hotkey, icon, upload};
+use crate::{config, hotkey, icon, store, upload};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use std::{
     error::Error,
     io::{BufRead, BufReader},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -24,16 +25,19 @@ use tao::{
 };
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
 };
 
-/// How often the daemon checks whether an upload added a link to the history.
+/// How often the daemon checks whether a capture or upload changed the history.
 const HISTORY_POLL: Duration = Duration::from_secs(2);
 
 /// Lines the settings process prints to stdout.
 pub const MSG_PAUSE: &str = "snipno:pause-hotkey";
 pub const MSG_RESUME: &str = "snipno:resume-hotkey";
 pub const MSG_RELOAD: &str = "snipno:reload-config";
+/// Printed by a capture process once its overlay has closed (copied or cancelled); it may still
+/// be saving the screenshot.
+pub const MSG_CAPTURE_DONE: &str = "snipno:capture-done";
 
 #[derive(Debug, PartialEq)]
 enum SettingsMsg {
@@ -63,103 +67,183 @@ enum UserEvent {
 
 struct Hotkeys {
     manager: GlobalHotKeyManager,
-    /// Capture to the clipboard.
     active: Option<HotKey>,
-    /// Capture and upload; only registered once an upload URL is set.
-    upload: Option<HotKey>,
 }
 
 impl Hotkeys {
     fn pause(&mut self) {
-        for hk in [self.active.take(), self.upload.take()].into_iter().flatten() {
+        if let Some(hk) = self.active.take() {
             let _ = self.manager.unregister(hk);
         }
     }
 
-    fn register(&mut self, shortcut: &str) -> Result<HotKey, String> {
-        let hk = hotkey::parse(shortcut).map_err(|e| format!("invalid hotkey {shortcut:?}: {e}"))?;
-        self.manager
-            .register(hk)
-            .map(|()| hk)
-            .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(shortcut)))
-    }
-
-    /// (Re)register both hotkeys from the config file and update their menu items.
-    fn apply_config(&mut self, capture_item: &MenuItem, upload_item: &MenuItem) {
+    /// (Re)register the hotkey from the config file and update its menu item.
+    fn apply_config(&mut self, capture_item: &MenuItem) {
         self.pause();
-        let cfg = config::load();
-        capture_item.set_text(match self.register(&cfg.hotkey) {
+        let shortcut = config::load().hotkey;
+        let registered = hotkey::parse(&shortcut)
+            .map_err(|e| format!("invalid hotkey {shortcut:?}: {e}"))
+            .and_then(|hk| {
+                self.manager
+                    .register(hk)
+                    .map(|()| hk)
+                    .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(&shortcut)))
+            });
+        capture_item.set_text(match registered {
             Ok(hk) => {
                 self.active = Some(hk);
-                format!("Take screenshot    {}", hotkey::pretty(&cfg.hotkey))
+                format!("Take screenshot    {}", hotkey::pretty(&shortcut))
             }
             Err(e) => {
                 eprintln!("snipno: {e}");
                 "Take screenshot    (hotkey unavailable)".to_string()
             }
         });
-
-        let up = &cfg.upload;
-        upload_item.set_enabled(up.enabled());
-        upload_item.set_text(if !up.enabled() {
-            "Screenshot & upload    (set up in Settings)".to_string()
-        } else if up.hotkey.is_empty() {
-            "Screenshot & upload".to_string()
-        } else {
-            match self.register(&up.hotkey) {
-                Ok(hk) => {
-                    self.upload = Some(hk);
-                    format!("Screenshot & upload    {}", hotkey::pretty(&up.hotkey))
-                }
-                Err(e) => {
-                    eprintln!("snipno: {e}");
-                    "Screenshot & upload    (hotkey unavailable)".to_string()
-                }
-            }
-        });
     }
 }
 
-/// "Copy recent link" submenu: the last few uploaded links, click one to copy it again. The
-/// upload process writes the history file; the daemon picks up changes by its modified time.
+/// How many captures "Recent screenshots" lists.
+const RECENT_SHOWN: usize = 10;
+
+enum RecentAction {
+    CopyImage(PathBuf),
+    CopyLink(String),
+    Upload(PathBuf),
+    Reveal(PathBuf),
+    OpenFolder,
+}
+
+/// "Recent screenshots" submenu: the last few captures, each with a submenu to copy the image or
+/// its link again, upload it, or show it in Finder. Captures and uploads write the history file;
+/// the daemon picks up changes by its modified time.
 struct Recent {
     menu: Submenu,
-    items: Vec<(MenuItem, String)>,
+    actions: Vec<(MenuId, RecentAction)>,
     seen: Option<SystemTime>,
+    /// Files the menu offers, to notice when one is deleted or moved in Finder.
+    shown: Vec<PathBuf>,
 }
 
 impl Recent {
     fn new() -> Self {
-        let mut recent = Self { menu: Submenu::new("Copy recent link", false), items: Vec::new(), seen: None };
-        recent.refresh();
+        let mut recent = Self { menu: Submenu::new("Recent screenshots", false), actions: Vec::new(), seen: None, shown: Vec::new() };
+        recent.refresh(true);
         recent
     }
 
-    fn refresh(&mut self) {
-        let modified = std::fs::metadata(upload::history_path()).and_then(|m| m.modified()).ok();
-        if modified == self.seen {
+    /// Rebuild the submenu if the history changed or a listed file is gone, or always with
+    /// `force` (settings changed).
+    fn refresh(&mut self, force: bool) {
+        let modified = std::fs::metadata(store::history_path()).and_then(|m| m.modified()).ok();
+        if !force && modified == self.seen && self.shown.iter().all(|f| f.is_file()) {
             return;
         }
         self.seen = modified;
-        for (item, _) in self.items.drain(..) {
-            let _ = self.menu.remove(&item);
-        }
-        for link in upload::history() {
-            let item = MenuItem::new(menu_label(&link), true, None);
-            if self.menu.append(&item).is_ok() {
-                self.items.push((item, link));
+        while self.menu.remove_at(0).is_some() {}
+        self.actions.clear();
+        self.shown.clear();
+
+        let cfg = config::load();
+        let entries: Vec<store::Entry> = store::history()
+            .into_iter()
+            .filter(|e| e.existing_file().is_some() || e.link.is_some())
+            .take(RECENT_SHOWN)
+            .collect();
+        for entry in &entries {
+            let sub = Submenu::new(entry_label(entry), true);
+            let file = entry.existing_file().map(Path::to_path_buf);
+            self.shown.extend(file.clone());
+            let actions = &mut self.actions;
+            if let Some(file) = &file {
+                add(actions, &sub, "Copy image", RecentAction::CopyImage(file.clone()));
             }
+            if let Some(link) = &entry.link {
+                add(actions, &sub, "Copy link", RecentAction::CopyLink(link.clone()));
+            }
+            if let Some(file) = &file {
+                if entry.link.is_none() && cfg.upload.enabled() {
+                    add(actions, &sub, "Upload and copy link", RecentAction::Upload(file.clone()));
+                }
+                add(actions, &sub, "Show in Finder", RecentAction::Reveal(file.clone()));
+            }
+            let _ = self.menu.append(&sub);
         }
-        self.menu.set_enabled(!self.items.is_empty());
+        if cfg.save.enabled {
+            if !entries.is_empty() {
+                let _ = self.menu.append(&PredefinedMenuItem::separator());
+            }
+            add(&mut self.actions, &self.menu, "Open screenshots folder", RecentAction::OpenFolder);
+        }
+        self.menu.set_enabled(!entries.is_empty() || cfg.save.enabled);
     }
 
-    /// Copy the link behind a clicked menu item; false if the item isn't one of ours.
-    fn copy(&self, id: &tray_icon::menu::MenuId) -> bool {
-        let Some((_, link)) = self.items.iter().find(|(item, _)| item.id() == id) else { return false };
-        if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(link.clone())) {
-            eprintln!("snipno: copying the link failed: {e}");
+    /// Run the action behind a clicked menu item; false if the item isn't one of ours.
+    fn click(&self, id: &MenuId) -> bool {
+        let Some((_, action)) = self.actions.iter().find(|(item, _)| item == id) else { return false };
+        match action {
+            RecentAction::CopyImage(file) => {
+                let file = file.clone();
+                // Decoding a big PNG takes a moment; keep the menu bar responsive.
+                std::thread::spawn(move || {
+                    if let Err(e) = copy_image(&file) {
+                        eprintln!("snipno: copying {} failed: {e}", file.display());
+                    }
+                });
+            }
+            RecentAction::CopyLink(link) => {
+                if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(link.clone())) {
+                    eprintln!("snipno: copying the link failed: {e}");
+                }
+            }
+            RecentAction::Upload(file) => {
+                if let Err(e) = upload::spawn(file, None, false) {
+                    eprintln!("snipno: could not start the upload: {e}");
+                }
+            }
+            RecentAction::Reveal(file) => open(&[std::ffi::OsStr::new("-R"), file.as_os_str()]),
+            RecentAction::OpenFolder => {
+                let folder = config::load().save.folder_path();
+                if let Err(e) = std::fs::create_dir_all(&folder) {
+                    eprintln!("snipno: could not create {}: {e}", folder.display());
+                }
+                open(&[folder.as_os_str()]);
+            }
         }
         true
+    }
+}
+
+fn add(actions: &mut Vec<(MenuId, RecentAction)>, menu: &Submenu, text: &str, action: RecentAction) {
+    let item = MenuItem::new(text, true, None);
+    if menu.append(&item).is_ok() {
+        actions.push((item.id().clone(), action));
+    }
+}
+
+fn copy_image(file: &Path) -> Result<(), Box<dyn Error>> {
+    let image = xcap::image::open(file)?.to_rgba8();
+    let (w, h) = image.dimensions();
+    arboard::Clipboard::new()?.set_image(arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(image.into_raw()),
+    })?;
+    Ok(())
+}
+
+/// macOS `open`: a folder in Finder, or with `-R` a file selected in its folder.
+fn open(args: &[&std::ffi::OsStr]) {
+    if let Err(e) = Command::new("/usr/bin/open").args(args).status() {
+        eprintln!("snipno: could not run open: {e}");
+    }
+}
+
+/// A capture in the menu: its file name, or the link if only that is left.
+fn entry_label(entry: &store::Entry) -> String {
+    match (entry.existing_file().and_then(Path::file_stem), &entry.link) {
+        (Some(name), _) => name.to_string_lossy().into_owned(),
+        (None, Some(link)) => menu_label(link),
+        (None, None) => "Screenshot".into(),
     }
 }
 
@@ -196,17 +280,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
-    let mut hotkeys = Hotkeys { manager: GlobalHotKeyManager::new()?, active: None, upload: None };
+    let mut hotkeys = Hotkeys { manager: GlobalHotKeyManager::new()?, active: None };
     let capture_item = MenuItem::new("Take screenshot", true, None);
-    let upload_item = MenuItem::new("Screenshot & upload", false, None);
-    hotkeys.apply_config(&capture_item, &upload_item);
+    hotkeys.apply_config(&capture_item);
     let mut recent = Recent::new();
     let settings_item = MenuItem::new("Settings…", true, None);
     let quit_item = MenuItem::new("Quit snipno", true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &capture_item,
-        &upload_item,
         &recent.menu,
         &settings_item,
         &PredefinedMenuItem::separator(),
@@ -221,10 +303,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
-        // Wake up now and then to pick up links added by finished uploads.
+        // Wake up now and then to pick up new captures and finished uploads.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + HISTORY_POLL);
         match event {
-            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => recent.refresh(),
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => recent.refresh(false),
 
             // macOS: the status item must be created once the event loop is running.
             Event::NewEvents(StartCause::Init) => {
@@ -250,26 +332,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     return;
                 }
                 if hotkeys.active.is_some_and(|hk| hk.id() == e.id()) {
-                    launch_capture(&capturing, false);
-                } else if hotkeys.upload.is_some_and(|hk| hk.id() == e.id()) {
-                    launch_capture(&capturing, true);
+                    launch_capture(&capturing);
                 }
             }
 
             Event::UserEvent(UserEvent::Menu(e)) => {
-                if recent.copy(&e.id) {
-                    // Copied a recent link.
+                if recent.click(&e.id) {
+                    // Handled a "Recent screenshots" item.
                 } else if e.id == *capture_item.id() {
-                    launch_capture(&capturing, false);
-                } else if e.id == *upload_item.id() {
-                    launch_capture(&capturing, true);
+                    launch_capture(&capturing);
                 } else if e.id == *settings_item.id() {
                     // Already open (maybe lost behind other windows)? Replace it with a fresh one
                     // in front. Settings save immediately, so nothing is lost.
                     if let Some((_, mut old)) = settings.take() {
                         let _ = old.kill();
                         let _ = old.wait();
-                        hotkeys.apply_config(&capture_item, &upload_item);
+                        hotkeys.apply_config(&capture_item);
+                        recent.refresh(true);
                     }
                     generation += 1;
                     match open_settings(generation, proxy.clone()) {
@@ -292,13 +371,19 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 match msg {
                     SettingsMsg::Pause => hotkeys.pause(),
-                    SettingsMsg::Resume | SettingsMsg::Reload => hotkeys.apply_config(&capture_item, &upload_item),
+                    SettingsMsg::Resume => hotkeys.apply_config(&capture_item),
+                    SettingsMsg::Reload => {
+                        hotkeys.apply_config(&capture_item);
+                        // Saving or uploading may have been switched on or off.
+                        recent.refresh(true);
+                    }
                     SettingsMsg::Closed => {
                         if let Some((_, mut child)) = settings.take() {
                             let _ = child.wait();
                         }
                         // Whatever happened in there, never leave the hotkey switched off.
-                        hotkeys.apply_config(&capture_item, &upload_item);
+                        hotkeys.apply_config(&capture_item);
+                        recent.refresh(true);
                     }
                 }
             }
@@ -329,41 +414,58 @@ fn open_settings(id: u32, proxy: EventLoopProxy<UserEvent>) -> std::io::Result<C
 
 /// Open an overlay on every display: one `snipno capture --monitor <id>` process each. The
 /// display under the cursor is started last so it ends up with keyboard focus. As soon as one
-/// overlay finishes (copied or cancelled, exit code 0) the others are closed.
-/// With `upload`, the overlays upload the selection and copy its link instead.
-fn launch_capture(capturing: &Arc<AtomicBool>, upload: bool) {
+/// overlay finishes (copied or cancelled: it prints [`MSG_CAPTURE_DONE`] or exits with code 0)
+/// the others are closed. The finished one is left to save its screenshot.
+fn launch_capture(capturing: &Arc<AtomicBool>) {
     // Ignore the hotkey while overlays are already up.
     if capturing.swap(true, Ordering::SeqCst) {
         return;
     }
     let exe = std::env::current_exe().unwrap_or_default();
-    let mut children: Vec<Child> = monitor_ids_cursor_last()
+    let mut children: Vec<(Child, Arc<AtomicBool>)> = monitor_ids_cursor_last()
         .into_iter()
         .filter_map(|id| {
             let mut cmd = Command::new(&exe);
-            cmd.arg("capture");
+            cmd.arg("capture").stdout(Stdio::piped());
             if let Some(id) = id {
                 cmd.args(["--monitor", &id.to_string()]);
             }
-            if upload {
-                cmd.arg("--upload");
+            let mut child = cmd.spawn().map_err(|e| eprintln!("snipno: could not start capture: {e}")).ok()?;
+            let done = Arc::new(AtomicBool::new(false));
+            if let Some(stdout) = child.stdout.take() {
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                        if line.trim() == MSG_CAPTURE_DONE {
+                            done.store(true, Ordering::SeqCst);
+                        }
+                    }
+                });
             }
-            cmd.spawn().map_err(|e| eprintln!("snipno: could not start capture: {e}")).ok()
+            Some((child, done))
         })
         .collect();
 
     let capturing = capturing.clone();
     std::thread::spawn(move || {
+        let mut finished = None;
         'watch: while !children.is_empty() {
             let mut i = 0;
             while i < children.len() {
-                match children[i].try_wait() {
+                if children[i].1.load(Ordering::SeqCst) {
+                    finished = Some(children.remove(i).0);
+                    break 'watch;
+                }
+                match children[i].0.try_wait() {
                     Ok(None) => i += 1,
-                    Ok(Some(status)) if status.success() => break 'watch,
+                    Ok(Some(status)) if status.success() => {
+                        finished = Some(children.remove(i).0);
+                        break 'watch;
+                    }
                     // An overlay that failed to start (e.g. a display that can't be captured)
                     // just drops out; the others stay up.
                     _ => {
-                        let mut failed = children.remove(i);
+                        let (mut failed, _) = children.remove(i);
                         let _ = failed.kill();
                         let _ = failed.wait();
                     }
@@ -371,11 +473,14 @@ fn launch_capture(capturing: &Arc<AtomicBool>, upload: bool) {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        for child in &mut children {
+        for (child, _) in &mut children {
             let _ = child.kill();
             let _ = child.wait();
         }
         capturing.store(false, Ordering::SeqCst);
+        if let Some(mut child) = finished {
+            let _ = child.wait();
+        }
     });
 }
 

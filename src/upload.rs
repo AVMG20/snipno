@@ -1,6 +1,6 @@
-//! `snipno upload <file.png> [--labels "a,b"]`: send a screenshot to the uploader configured in
-//! Settings and put the returned link on the clipboard. The overlay starts this as a detached
-//! process, so the capture windows close right away while the upload runs.
+//! `snipno upload <file.png> [--labels "a,b"] [--temp]`: send a screenshot to the uploader
+//! configured in Settings and put the returned link on the clipboard. The overlay and the menu
+//! bar's "Recent screenshots" start this as a detached process, so nothing waits on the network.
 //!
 //! The uploader is ShareX-style and works with most self-hosted image hosts: a multipart POST
 //! with the image in the `file` field, an optional bearer token, labels as `tags`, any extra form
@@ -9,24 +9,31 @@
 //! The request itself is made by macOS's own `/usr/bin/curl`, fed its options on stdin so the
 //! token never shows up in the process list.
 
-use crate::config::{self, Upload};
+use crate::{
+    config::{self, Upload},
+    store,
+};
 use serde_json::Value;
 use std::{
     error::Error,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
 };
 
-pub fn run(file: &Path, labels: Option<String>) -> Result<(), Box<dyn Error>> {
+/// Upload `file`. With `temp` the file was written just for this and is deleted afterwards;
+/// otherwise it's a saved screenshot, and the link is remembered on its history entry.
+pub fn run(file: &Path, labels: Option<String>, temp: bool) -> Result<(), Box<dyn Error>> {
     let cfg = config::load().upload;
     let labels = labels.unwrap_or_else(|| cfg.labels.clone());
     let result = send(&cfg, file, &labels);
-    let _ = fs::remove_file(file);
+    if temp {
+        let _ = fs::remove_file(file);
+    }
     match result {
         Ok(link) => {
-            if let Err(e) = remember(&link) {
+            if let Err(e) = store::add_link((!temp).then_some(file), &link) {
                 eprintln!("snipno: could not save upload history: {e}");
             }
             arboard::Clipboard::new()?.set_text(link.clone())?;
@@ -40,59 +47,17 @@ pub fn run(file: &Path, labels: Option<String>) -> Result<(), Box<dyn Error>> {
     }
 }
 
-/// How many links the menu bar menu keeps under "Copy recent link".
-pub const HISTORY_LEN: usize = 5;
-
-/// Recent links, newest first, next to the config file.
-pub fn history_path() -> PathBuf {
-    config::path().with_file_name("history.json")
-}
-
-pub fn history() -> Vec<String> {
-    let mut links: Vec<String> = fs::read_to_string(history_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    links.truncate(HISTORY_LEN);
-    links
-}
-
-/// `links` with `link` moved (or added) to the front, at most [`HISTORY_LEN`] long.
-pub fn with_link(mut links: Vec<String>, link: &str) -> Vec<String> {
-    links.retain(|l| l != link);
-    links.insert(0, link.to_string());
-    links.truncate(HISTORY_LEN);
-    links
-}
-
-fn remember(link: &str) -> std::io::Result<()> {
-    let path = history_path();
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+/// Hand `file` to a detached `snipno upload`, so the caller doesn't wait for the network.
+pub fn spawn(file: &Path, labels: Option<&str>, temp: bool) -> std::io::Result<()> {
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg("upload").arg(file);
+    if let Some(labels) = labels {
+        cmd.args(["--labels", labels]);
     }
-    let json = serde_json::to_string_pretty(&with_link(history(), link)).map_err(std::io::Error::other)?;
-    // Write then rename, so the daemon never reads a half-written file.
-    let tmp = path.with_file_name(format!("history.{}.tmp", std::process::id()));
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, &path)
-}
-
-/// The name the image is uploaded as: the template with `{date}` (2026-11-12), `{time}`
-/// (14-05-09) and `{timestamp}` (Unix seconds) filled in, made safe for a file name, plus `.png`.
-pub fn file_name(template: &str, now: chrono::DateTime<chrono::Local>) -> String {
-    let template = template.trim();
-    let template = if template.is_empty() { "{date}-{time}" } else { template };
-    let name = template
-        .replace("{date}", &now.format("%Y-%m-%d").to_string())
-        .replace("{time}", &now.format("%H-%M-%S").to_string())
-        .replace("{timestamp}", &now.timestamp().to_string());
-    // `/` and `:` mean folders to some servers; quotes and `;` would break the form header.
-    let name: String = name
-        .chars()
-        .map(|c| if c.is_control() || "/\\:\";".contains(c) { '-' } else { c })
-        .collect();
-    let name = name.trim().trim_end_matches(".png").trim();
-    format!("{}.png", if name.is_empty() { "screenshot" } else { name })
+    if temp {
+        cmd.arg("--temp");
+    }
+    cmd.stdin(Stdio::null()).spawn().map(drop)
 }
 
 fn send(cfg: &Upload, file: &Path, labels: &str) -> Result<String, String> {
@@ -110,7 +75,7 @@ fn send(cfg: &Upload, file: &Path, labels: &str) -> Result<String, String> {
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(curl_config(cfg, file, labels, &file_name(&cfg.name, chrono::Local::now())).as_bytes())
+        .write_all(curl_config(cfg, file, labels, &store::file_name(&cfg.name, chrono::Local::now())).as_bytes())
         .map_err(|e| format!("could not run curl: {e}"))?;
     let out = child.wait_with_output().map_err(|e| format!("curl failed: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout);
@@ -272,7 +237,6 @@ mod tests {
 
     fn imgstore() -> Upload {
         Upload {
-            hotkey: String::new(),
             url: "https://img.example.com/api/images".into(),
             token: "imgs_secret".into(),
             labels: "snipno".into(),
@@ -280,33 +244,6 @@ mod tests {
             link: "https://img.example.com/i/{json:images[0].slug}".into(),
             name: "shot".into(),
         }
-    }
-
-    fn at(s: &str) -> chrono::DateTime<chrono::Local> {
-        use chrono::TimeZone;
-        let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
-        chrono::Local.from_local_datetime(&naive).unwrap()
-    }
-
-    #[test]
-    fn history_keeps_the_newest_five_without_duplicates() {
-        let links: Vec<String> = (1..=5).map(|i| format!("https://x/{i}")).collect();
-        let out = with_link(links.clone(), "https://x/3");
-        assert_eq!(out, ["https://x/3", "https://x/1", "https://x/2", "https://x/4", "https://x/5"]);
-        let out = with_link(links, "https://x/new");
-        assert_eq!(out.len(), HISTORY_LEN);
-        assert_eq!((out[0].as_str(), out[4].as_str()), ("https://x/new", "https://x/4"));
-    }
-
-    #[test]
-    fn file_name_fills_in_the_date_and_time() {
-        let now = at("2026-11-12 14:05:09");
-        assert_eq!(file_name("screenshot-{date}-{time}", now), "screenshot-2026-11-12-14-05-09.png");
-        assert_eq!(file_name("{timestamp}", now), format!("{}.png", now.timestamp()));
-        assert_eq!(file_name("screenshot", now), "screenshot.png");
-        assert_eq!(file_name("  ", now), "2026-11-12-14-05-09.png");
-        assert_eq!(file_name("bug.png", now), "bug.png");
-        assert_eq!(file_name("a/b: \"c\";d", now), "a-b- -c--d.png");
     }
 
     #[test]

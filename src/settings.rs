@@ -1,13 +1,13 @@
-//! `snipno settings`: record the global hotkeys and the overlay's tool shortcuts, and set up
-//! where "screenshot & upload" sends captures.
+//! `snipno settings`: record the global hotkey and the overlay's tool shortcuts, choose where
+//! captures are saved, and set up where the overlay's upload button sends them.
 //! Tells the daemon over stdout to pause the hotkey while recording and to reload after a save
 //! (see `daemon::MSG_*`).
 
-use crate::{annotate::Tool, config, daemon, hotkey, icon, theme, toolbar};
+use crate::{annotate::Tool, config, daemon, hotkey, icon, store, theme, toolbar};
 use eframe::egui::{
     self, Color32, CornerRadius, Event, FontId, Key, Margin, RichText, Stroke, TextureHandle, vec2,
 };
-use std::error::Error;
+use std::{error::Error, sync::mpsc, time::Duration};
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
@@ -51,6 +51,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 recording: None,
                 tab: Tab::Shortcuts,
                 status: None,
+                picking: None,
                 logo,
                 snapshot: crate::snapshot::Snapshot::from_env(),
             }))
@@ -63,21 +64,25 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
     Capture,
-    Upload,
     Tool(Tool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Shortcuts,
+    Saving,
     Upload,
 }
+
+const TABS: [(Tab, &str); 3] = [(Tab::Shortcuts, "Shortcuts"), (Tab::Saving, "Saving"), (Tab::Upload, "Upload")];
 
 struct Settings {
     config: config::Config,
     recording: Option<Target>,
     tab: Tab,
     status: Option<(String, bool)>,
+    /// The folder picker is open; it sends the chosen folder, or `None` if cancelled.
+    picking: Option<mpsc::Receiver<Option<String>>>,
     logo: TextureHandle,
     snapshot: Option<crate::snapshot::Snapshot>,
 }
@@ -123,39 +128,25 @@ impl Settings {
         });
     }
 
-    /// Record a global hotkey: the capture one, or the upload one (`""` removes that).
-    fn set_hotkey(&mut self, target: Target, s: String) {
-        if !s.is_empty()
-            && let Err(e) = hotkey::parse(&s)
-        {
+    /// Record the global capture hotkey.
+    fn set_hotkey(&mut self, s: String) {
+        if let Err(e) = hotkey::parse(&s) {
             self.status = Some((format!("Can't use that shortcut: {e}"), false));
             tell_daemon(daemon::MSG_RESUME);
             return;
         }
-        let other = if target == Target::Upload { &self.config.hotkey } else { &self.config.upload.hotkey };
-        if !s.is_empty() && s.eq_ignore_ascii_case(other) {
-            let what = if target == Target::Upload { "capture" } else { "upload" };
-            self.status = Some((format!("{} is already your {what} shortcut.", hotkey::pretty(&s)), false));
-            tell_daemon(daemon::MSG_RESUME);
-            return;
-        }
-        let removed = s.is_empty();
-        match target {
-            Target::Upload => self.config.upload.hotkey = s,
-            _ => self.config.hotkey = s,
-        }
+        self.config.hotkey = s;
         self.status = Some(match config::save(&self.config) {
             Ok(()) => {
                 tell_daemon(daemon::MSG_RELOAD);
-                let msg = if removed { "Shortcut removed." } else { "Saved. The new shortcut works right away." };
-                (msg.into(), true)
+                ("Saved. The new shortcut works right away.".into(), true)
             }
             Err(e) => (format!("Could not save config: {e}"), false),
         });
     }
 
-    /// Save after editing an upload field; the daemon reloads to enable or disable the menu item.
-    fn save_upload(&mut self) {
+    /// Save after editing a saving or upload setting; the daemon reloads to update the menu.
+    fn save_and_reload(&mut self) {
         self.status = Some(match config::save(&self.config) {
             Ok(()) => {
                 tell_daemon(daemon::MSG_RELOAD);
@@ -185,10 +176,10 @@ impl Settings {
             }
             match target {
                 // The global hotkey is registered by physical key position.
-                Target::Capture | Target::Upload => match hotkey::from_key_press(physical, mods) {
+                Target::Capture => match hotkey::from_key_press(physical, mods) {
                     Some(s) => {
                         self.recording = None; // the reload below re-enables the hotkey
-                        self.set_hotkey(target, s);
+                        self.set_hotkey(s);
                         return;
                     }
                     None => {
@@ -223,15 +214,10 @@ impl Settings {
         });
     }
 
-    fn shortcut_card(&mut self, ui: &mut egui::Ui, target: Target) {
-        let (title, desc, current) = match target {
-            Target::Upload => (
-                "Upload shortcut",
-                "Capture, upload, and copy the link.",
-                self.config.upload.hotkey.clone(),
-            ),
-            _ => ("Capture shortcut", "Press it anywhere to start a capture.", self.config.hotkey.clone()),
-        };
+    fn shortcut_card(&mut self, ui: &mut egui::Ui) {
+        let target = Target::Capture;
+        let (title, desc, current) =
+            ("Capture shortcut", "Press it anywhere to start a capture.", self.config.hotkey.clone());
         egui::Frame::new()
             .fill(theme::SURFACE)
             .stroke(Stroke::new(1.0, theme::BORDER))
@@ -272,18 +258,12 @@ impl Settings {
                         if ui.add(primary_button("Record new shortcut")).clicked() {
                             self.start_recording(target);
                         }
-                        if target == Target::Upload {
-                            if ui.add_enabled(!current.is_empty(), ghost_button("Remove")).clicked() {
-                                self.set_hotkey(target, String::new());
-                            }
-                        } else {
-                            let is_default = current == config::DEFAULT_HOTKEY;
-                            let reset = ui
-                                .add_enabled(!is_default, ghost_button("Reset"))
-                                .on_hover_text(format!("Back to {}", hotkey::pretty(config::DEFAULT_HOTKEY)));
-                            if reset.clicked() {
-                                self.set_hotkey(target, config::DEFAULT_HOTKEY.to_string());
-                            }
+                        let is_default = current == config::DEFAULT_HOTKEY;
+                        let reset = ui
+                            .add_enabled(!is_default, ghost_button("Reset"))
+                            .on_hover_text(format!("Back to {}", hotkey::pretty(config::DEFAULT_HOTKEY)));
+                        if reset.clicked() {
+                            self.set_hotkey(config::DEFAULT_HOTKEY.to_string());
                         }
                     }
                 });
@@ -367,9 +347,129 @@ impl Settings {
                 false,
             );
             if changed {
-                self.save_upload();
+                self.save_and_reload();
             }
         });
+    }
+
+    fn upload_how_card(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.label(RichText::new("Uploading a capture").size(13.5).color(theme::TEXT));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let text = |t: &str| RichText::new(t).size(12.0).color(theme::MUTED);
+                ui.label(text("Switch on the upload button in the overlay's toolbar, or press"));
+                theme::kbd(ui, "⌘U", 11.0);
+                ui.label(text(
+                    "there, and the capture is uploaded and its link copied. Saved screenshots can \
+                     also be uploaded later from Recent screenshots in the menu bar menu.",
+                ));
+            });
+        });
+    }
+
+    fn saving_card(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.label(RichText::new("Save screenshots").size(13.5).color(theme::TEXT));
+                    ui.label(
+                        RichText::new("Keep a PNG of every capture, listed under Recent screenshots.")
+                            .size(12.0)
+                            .color(theme::MUTED),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if toggle(ui, &mut self.config.save.enabled).clicked() {
+                        self.save_and_reload();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+
+            let enabled = self.config.save.enabled;
+            let mut changed = false;
+            ui.add_enabled_ui(enabled, |ui| {
+                let save = &mut self.config.save;
+                let default = config::tilde(&config::default_folder());
+                changed |= field(ui, "Folder", &default, &mut save.folder, false);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let choose = ui.add_enabled(self.picking.is_none(), small_ghost_button("Choose…"));
+                    if choose.clicked() {
+                        self.picking = Some(pick_folder(save.folder_path()));
+                    }
+                    if ui.add(small_ghost_button("Show in Finder")).clicked() {
+                        let folder = save.folder_path();
+                        let _ = std::fs::create_dir_all(&folder);
+                        let _ = std::process::Command::new("/usr/bin/open").arg(&folder).spawn();
+                    }
+                    if !save.folder.trim().is_empty() && ui.add(small_ghost_button("Use default")).clicked() {
+                        save.folder.clear();
+                        changed = true;
+                    }
+                });
+
+                changed |= field(ui, "File name", "{date}-{time}  ·  also {timestamp}", &mut save.name, false);
+                ui.label(
+                    RichText::new(format!("For example {}", store::file_name(&save.name, chrono::Local::now())))
+                        .size(11.5)
+                        .color(theme::FAINT),
+                );
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Keep").size(12.0).color(theme::MUTED));
+                ui.horizontal(|ui| {
+                    let keep = ui.add(
+                        egui::DragValue::new(&mut save.keep).range(0..=100_000).speed(1.0).update_while_editing(false),
+                    );
+                    // Save the number once it's set, not every step on the way there: a capture
+                    // in between would clean up down to that step, and deleting can't be undone.
+                    changed |= (keep.changed() && !keep.dragged()) || keep.drag_stopped();
+                    let note = if save.keep == 0 {
+                        "screenshots: all of them, nothing is deleted".to_string()
+                    } else {
+                        "newest screenshots, older ones are deleted (0 keeps all)".to_string()
+                    };
+                    ui.label(RichText::new(note).size(12.0).color(theme::MUTED));
+                });
+                ui.label(
+                    RichText::new("Only files snipno saved are ever deleted, checked on each new capture.")
+                        .size(11.5)
+                        .color(theme::FAINT),
+                );
+            });
+            if changed {
+                // Captures read these when they start; the daemon's menu doesn't need a reload.
+                self.save_config();
+            }
+        });
+    }
+
+    fn save_config(&mut self) {
+        self.status = Some(match config::save(&self.config) {
+            Ok(()) => ("Saved.".into(), true),
+            Err(e) => (format!("Could not save config: {e}"), false),
+        });
+    }
+
+    /// Take the folder chosen in the picker, once it's closed.
+    fn poll_picker(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.picking else { return };
+        match rx.try_recv() {
+            Ok(choice) => {
+                self.picking = None;
+                if let Some(folder) = choice {
+                    self.config.save.folder = folder;
+                    self.save_config();
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(150)),
+            Err(mpsc::TryRecvError::Disconnected) => self.picking = None,
+        }
     }
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
@@ -380,8 +480,8 @@ impl Settings {
             .inner_margin(Margin::same(3))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.columns(2, |cols| {
-                    for (col, (tab, name)) in cols.iter_mut().zip([(Tab::Shortcuts, "Shortcuts"), (Tab::Upload, "Upload")]) {
+                ui.columns(TABS.len(), |cols| {
+                    for (col, (tab, name)) in cols.iter_mut().zip(TABS) {
                         let on = self.tab == tab;
                         let button = egui::Button::new(
                             RichText::new(name).size(12.5).color(if on { theme::TEXT } else { theme::MUTED }),
@@ -437,6 +537,53 @@ fn field(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String, passwor
             .margin(vec2(8.0, 5.0)),
     )
     .changed()
+}
+
+/// macOS's folder picker, run by `osascript` on its own thread. Sends the chosen folder (with
+/// `~` for the home folder), or `None` when cancelled.
+fn pick_folder(current: std::path::PathBuf) -> mpsc::Receiver<Option<String>> {
+    let (tx, rx) = mpsc::channel();
+    let start = if current.is_dir() { current } else { dirs::home_dir().unwrap_or_default() };
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "activate",
+                "-e",
+                "POSIX path of (choose folder with prompt \"Save screenshots in\" default location (POSIX file (item 1 of argv)))",
+                "-e",
+                "end run",
+            ])
+            .arg(&start)
+            .output();
+        let chosen = out.ok().filter(|o| o.status.success()).and_then(|o| {
+            let path = String::from_utf8_lossy(&o.stdout).trim().trim_end_matches('/').to_string();
+            (!path.is_empty()).then(|| config::tilde(std::path::Path::new(&path)))
+        });
+        let _ = tx.send(chosen);
+    });
+    rx
+}
+
+/// An on/off switch.
+fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(36.0, 20.0), egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.12);
+    let p = ui.painter();
+    let bg = if *on { theme::ACCENT } else { theme::SURFACE_HI };
+    p.rect_filled(rect, CornerRadius::same(255), bg);
+    if !*on {
+        p.rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, theme::BORDER_HI), egui::StrokeKind::Inside);
+    }
+    let x = egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), t);
+    p.circle_filled(egui::pos2(x, rect.center().y), 7.0, Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn separator(ui: &mut egui::Ui) {
@@ -501,6 +648,7 @@ impl eframe::App for Settings {
         if let Some(snap) = &mut self.snapshot {
             snap.tick(&ctx);
         }
+        self.poll_picker(&ctx);
         if let Some(target) = self.recording {
             self.record(&ctx, target);
         } else if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::W))
@@ -518,14 +666,15 @@ impl eframe::App for Settings {
                 ui.add_space(12.0);
                 match self.tab {
                     Tab::Shortcuts => {
-                        self.shortcut_card(ui, Target::Capture);
+                        self.shortcut_card(ui);
                         ui.add_space(12.0);
                         self.tools_card(ui);
                     }
+                    Tab::Saving => self.saving_card(ui),
                     Tab::Upload => {
-                        self.shortcut_card(ui, Target::Upload);
-                        ui.add_space(12.0);
                         self.destination_card(ui);
+                        ui.add_space(12.0);
+                        self.upload_how_card(ui);
                     }
                 }
                 ui.add_space(10.0);

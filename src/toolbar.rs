@@ -51,6 +51,7 @@ pub const TOP: f32 = 16.0;
 pub enum Action {
     Undo,
     FullScreen,
+    ToggleUpload,
     Close,
 }
 
@@ -59,6 +60,9 @@ pub struct State<'a> {
     pub color: &'a mut Color32,
     pub width: &'a mut f32,
     pub can_undo: bool,
+    /// Whether the capture is uploaded instead of copied; `None` hides the button (no uploader
+    /// set up).
+    pub upload: Option<bool>,
     pub keys: &'a crate::config::ToolKeys,
 }
 
@@ -73,6 +77,7 @@ enum Icon {
     Pixelate,
     Undo,
     Screen,
+    Upload,
     Close,
 }
 
@@ -118,11 +123,16 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
                         if icon_button(ui, Icon::Undo, false, st.can_undo).on_hover_text(tip("Undo", "⌘Z")).clicked() {
                             action = Some(Action::Undo);
                         }
-                        if icon_button(ui, Icon::Screen, false, true)
-                            .on_hover_text(tip("Copy full screen", "↩"))
-                            .clicked()
-                        {
+                        let uploading = st.upload == Some(true);
+                        let screen_tip = if uploading { "Upload full screen" } else { "Copy full screen" };
+                        if icon_button(ui, Icon::Screen, false, true).on_hover_text(tip(screen_tip, "↩")).clicked() {
                             action = Some(Action::FullScreen);
+                        }
+                        if let Some(on) = st.upload {
+                            let name = if on { "Uploading  ·  click to copy instead" } else { "Upload instead of copying" };
+                            if icon_button(ui, Icon::Upload, on, true).on_hover_text(tip(name, "⌘U")).clicked() {
+                                action = Some(Action::ToggleUpload);
+                            }
                         }
                         if icon_button(ui, Icon::Close, false, true).on_hover_text(tip("Cancel", "Esc")).clicked() {
                             action = Some(Action::Close);
@@ -133,8 +143,7 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
     action
 }
 
-/// Small pill under the toolbar that fades out after a few seconds.
-/// Upload mode: a pill under the toolbar with the labels that go along with the upload.
+/// Upload on: a pill under the toolbar with the labels that go along with the upload.
 pub fn labels_field(ctx: &egui::Context, labels: &mut String) {
     egui::Area::new(Id::unique("snipno-labels"))
         .order(Order::Foreground)
@@ -164,6 +173,7 @@ pub fn labels_field(ctx: &egui::Context, labels: &mut String) {
         });
 }
 
+/// Small pill under the toolbar that fades out after a few seconds.
 pub fn hint(ctx: &egui::Context, text: &str, key: &str, opacity: f32) {
     if opacity <= 0.0 {
         return;
@@ -333,6 +343,12 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             );
             line(&[at(8.0, 11.5), at(8.0, 14.0)]);
             line(&[at(5.0, 14.5), at(11.0, 14.5)]);
+        }
+        Icon::Upload => {
+            // Arrow rising out of a tray.
+            line(&[at(2.0, 9.5), at(2.0, 14.0), at(14.0, 14.0), at(14.0, 9.5)]);
+            line(&[at(8.0, 10.5), at(8.0, 2.0)]);
+            line(&[at(4.5, 5.5), at(8.0, 2.0), at(11.5, 5.5)]);
         }
         Icon::Close => {
             line(&[at(3.5, 3.5), at(12.5, 12.5)]);

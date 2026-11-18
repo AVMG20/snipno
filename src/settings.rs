@@ -1,4 +1,4 @@
-//! `snipno settings`: record the global hotkey and the overlay's tool shortcuts, and choose
+//! `snipno settings`: record the global hotkeys and the overlay's tool shortcuts, and choose
 //! whether and where captures are saved.
 //! Tells the daemon over stdout to pause the hotkey while recording and to reload after a save
 //! (see `daemon::MSG_*`).
@@ -13,7 +13,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("snipno")
-            .with_inner_size([460.0, 820.0])
+            .with_inner_size([460.0, 860.0])
             .with_resizable(false)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
@@ -64,8 +64,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
     Capture,
+    /// The extract-text hotkey.
+    Text,
     Tool(Tool),
 }
+
+/// The global hotkeys, in the order the settings list them.
+const GLOBAL: [(Target, &str); 2] = [(Target::Capture, "Take screenshot"), (Target::Text, "Extract text")];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -116,8 +121,8 @@ impl Settings {
             self.status = Some((format!("{} is already used for {}.", hotkey::pretty(&key), toolbar::tool_name(other)), false));
             return;
         }
-        if key.eq_ignore_ascii_case(&self.config.hotkey) {
-            self.status = Some((format!("{} is your capture shortcut.", hotkey::pretty(&key)), false));
+        if hotkey::same(&key, &self.config.hotkey) || hotkey::same(&key, &self.config.text_hotkey) {
+            self.status = Some((format!("{} is a global shortcut.", hotkey::pretty(&key)), false));
             return;
         }
         self.config.tool_keys.set(tool, key);
@@ -127,14 +132,30 @@ impl Settings {
         });
     }
 
-    /// Record the global capture hotkey.
-    fn set_hotkey(&mut self, s: String) {
+    fn global_hotkey(&self, target: Target) -> &str {
+        match target {
+            Target::Text => &self.config.text_hotkey,
+            _ => &self.config.hotkey,
+        }
+    }
+
+    /// Record a global hotkey: the capture one or the extract-text one.
+    fn set_hotkey(&mut self, target: Target, s: String) {
         if let Err(e) = hotkey::parse(&s) {
             self.status = Some((format!("Can't use that shortcut: {e}"), false));
             tell_daemon(daemon::MSG_RESUME);
             return;
         }
-        self.config.hotkey = s;
+        let clash = GLOBAL.into_iter().find(|(t, _)| *t != target && hotkey::same(self.global_hotkey(*t), &s));
+        if let Some((_, name)) = clash {
+            self.status = Some((format!("{} is already used for {name}.", hotkey::pretty(&s)), false));
+            tell_daemon(daemon::MSG_RESUME);
+            return;
+        }
+        match target {
+            Target::Text => self.config.text_hotkey = s,
+            _ => self.config.hotkey = s,
+        }
         self.status = Some(match config::save(&self.config) {
             Ok(()) => {
                 tell_daemon(daemon::MSG_RELOAD);
@@ -175,10 +196,10 @@ impl Settings {
             }
             match target {
                 // The global hotkey is registered by physical key position.
-                Target::Capture => match hotkey::from_key_press(physical, mods) {
+                Target::Capture | Target::Text => match hotkey::from_key_press(physical, mods) {
                     Some(s) => {
                         self.recording = None; // the reload below re-enables the hotkey
-                        self.set_hotkey(s);
+                        self.set_hotkey(target, s);
                         return;
                     }
                     None => {
@@ -214,59 +235,63 @@ impl Settings {
     }
 
     fn shortcut_card(&mut self, ui: &mut egui::Ui) {
-        let target = Target::Capture;
-        let (title, desc, current) =
-            ("Capture shortcut", "Press it anywhere to start a capture.", self.config.hotkey.clone());
-        egui::Frame::new()
-            .fill(theme::SURFACE)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::same(16))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.label(RichText::new("Global shortcuts").size(13.5).color(theme::TEXT));
+            ui.label(RichText::new("Press them anywhere. Extract text copies the words in an area.").size(12.0).color(theme::MUTED));
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            for (target, name) in GLOBAL {
+                separator(ui);
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 3.0;
-                        ui.label(RichText::new(title).size(13.5).color(theme::TEXT));
-                        ui.label(RichText::new(desc).size(12.0).color(theme::MUTED));
-                    });
+                    ui.set_min_height(38.0);
+                    ui.label(RichText::new(name).size(13.0).color(theme::TEXT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.recording == Some(target) {
+                            if ui.add(small_ghost_button("Cancel")).clicked() {
+                                self.stop_recording();
+                                self.status = None;
+                            }
                             recording_pill(ui);
-                        } else if current.is_empty() {
-                            ui.label(RichText::new("None").size(12.5).color(theme::FAINT));
                         } else {
-                            chips(ui, &current, 13.0);
+                            if ui.add(small_ghost_button("Change")).clicked() {
+                                self.start_recording(target);
+                            }
+                            ui.add_space(4.0);
+                            let key = self.global_hotkey(target).to_string();
+                            ui.allocate_ui_with_layout(
+                                vec2(140.0, 24.0),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if key.trim().is_empty() {
+                                        ui.label(RichText::new("None").size(12.5).color(theme::FAINT));
+                                    } else {
+                                        chips(ui, &key, 12.5);
+                                    }
+                                },
+                            );
                         }
                     });
                 });
+            }
 
-                ui.add_space(12.0);
-                let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
-                ui.painter().rect_filled(line, 0.0, theme::BORDER);
-                ui.add_space(12.0);
-
-                ui.horizontal(|ui| {
-                    if self.recording == Some(target) {
-                        if ui.add(ghost_button("Cancel")).clicked() {
-                            self.stop_recording();
-                            self.status = None;
-                        }
-                        ui.label(RichText::new("Esc also cancels").size(12.0).color(theme::FAINT));
-                    } else {
-                        if ui.add(primary_button("Record new shortcut")).clicked() {
-                            self.start_recording(target);
-                        }
-                        let is_default = current == config::DEFAULT_HOTKEY;
-                        let reset = ui
-                            .add_enabled(!is_default, ghost_button("Reset"))
-                            .on_hover_text(format!("Back to {}", hotkey::pretty(config::DEFAULT_HOTKEY)));
-                        if reset.clicked() {
-                            self.set_hotkey(config::DEFAULT_HOTKEY.to_string());
-                        }
-                    }
-                });
-            });
+            separator(ui);
+            ui.add_space(12.0);
+            let is_default = self.config.hotkey == config::DEFAULT_HOTKEY
+                && self.config.text_hotkey == config::DEFAULT_TEXT_HOTKEY;
+            let reset = ui.add_enabled(!is_default, ghost_button("Reset to defaults")).on_hover_text(format!(
+                "{} and {}",
+                hotkey::pretty(config::DEFAULT_HOTKEY),
+                hotkey::pretty(config::DEFAULT_TEXT_HOTKEY)
+            ));
+            if reset.clicked() {
+                self.stop_recording();
+                self.config.hotkey = config::DEFAULT_HOTKEY.into();
+                self.config.text_hotkey = config::DEFAULT_TEXT_HOTKEY.into();
+                self.save_and_reload();
+            }
+        });
     }
 
     fn tools_card(&mut self, ui: &mut egui::Ui) {
@@ -558,14 +583,6 @@ fn small_ghost_button(text: &str) -> egui::Button<'_> {
         .stroke(Stroke::new(1.0, theme::BORDER_HI))
         .corner_radius(CornerRadius::same(7))
         .min_size(vec2(0.0, 26.0))
-}
-
-fn primary_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(Color32::WHITE).size(13.0))
-        .fill(theme::ACCENT)
-        .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::same(8))
-        .min_size(vec2(0.0, 30.0))
 }
 
 fn ghost_button(text: &str) -> egui::Button<'_> {

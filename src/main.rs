@@ -5,6 +5,7 @@ mod daemon;
 mod hotkey;
 mod icon;
 mod macos;
+mod ocr;
 mod overlay;
 mod settings;
 mod snap;
@@ -16,7 +17,7 @@ mod toolbar;
 use std::process::ExitCode;
 
 const USAGE: &str =
-    "usage: snipno [daemon | capture [--monitor <id>] | settings | monitors | icon <out.png> [size] [--tray]]";
+    "usage: snipno [daemon | capture [--monitor <id>] [--text] | settings | ocr <image> | monitors | icon <out.png> [size] [--tray]]";
 
 /// `snipno monitors`: display ids for `capture --monitor`, with position and size in points.
 fn list_monitors() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,9 +42,10 @@ fn main() -> ExitCode {
         None | Some("daemon") => daemon::run(),
         Some("capture") => {
             let monitor = args.iter().position(|a| a == "--monitor").and_then(|i| args.get(i + 1)?.parse().ok());
-            overlay::run(monitor)
+            overlay::run(monitor, args.iter().any(|a| a == "--text"))
         }
         Some("settings") => settings::run(),
+        Some("ocr") => ocr::run_cli(&args[1..]),
         Some("monitors") => list_monitors(),
         Some("icon") => icon::write_png(&args[1..]),
         Some("-h" | "--help") => {

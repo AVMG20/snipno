@@ -9,6 +9,14 @@ pub fn parse(s: &str) -> Result<HotKey, String> {
     HotKey::from_str(s).map_err(|e| e.to_string())
 }
 
+/// Do two shortcut strings mean the same keys (`shift+cmd+1` is `cmd+shift+1`)?
+pub fn same(a: &str, b: &str) -> bool {
+    match (parse(a), parse(b)) {
+        (Ok(a), Ok(b)) => a.id() == b.id(),
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
+}
+
 /// Build a hotkey string from a key press. Returns `None` for keys we can't register or when
 /// a typing key is pressed without ⌘, ⌃ or ⌥ — a bare letter as a global hotkey would hijack
 /// typing. Keys that never type anything (F13–F24, Insert) may be used on their own, so a

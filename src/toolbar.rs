@@ -60,11 +60,14 @@ pub struct State<'a> {
     pub width: &'a mut f32,
     pub can_undo: bool,
     pub keys: &'a crate::config::ToolKeys,
+    /// Text capture: no drawing tools, just "copy text" and the full-screen and cancel buttons.
+    pub text: bool,
 }
 
 #[derive(Clone, Copy)]
 enum Icon {
     Select,
+    Text,
     Pen,
     Arrow,
     Rect,
@@ -91,6 +94,21 @@ pub fn show(ctx: &egui::Context, st: State<'_>) -> Option<Action> {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+
+                        if st.text {
+                            let _ = icon_button(ui, Icon::Text, true, true).on_hover_text("Copy text  ·  select an area");
+                            divider(ui);
+                            if icon_button(ui, Icon::Screen, false, true)
+                                .on_hover_text(tip("Copy all text on this screen", "↩"))
+                                .clicked()
+                            {
+                                action = Some(Action::FullScreen);
+                            }
+                            if icon_button(ui, Icon::Close, false, true).on_hover_text(tip("Cancel", "Esc")).clicked() {
+                                action = Some(Action::Close);
+                            }
+                            return;
+                        }
 
                         for (tool, icon, name) in TOOLS {
                             let selected = *st.tool == tool;
@@ -245,6 +263,16 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             line(&[at(b - arm, a), at(b, a), at(b, a + arm)]);
             line(&[at(b, b - arm), at(b, b), at(b - arm, b)]);
             line(&[at(a + arm, b), at(a, b), at(a, b - arm)]);
+        }
+        // The crop marquee with a T inside.
+        Icon::Text => {
+            let (a, b, arm) = (1.0, 15.0, 3.5);
+            line(&[at(a, a + arm), at(a, a), at(a + arm, a)]);
+            line(&[at(b - arm, a), at(b, a), at(b, a + arm)]);
+            line(&[at(b, b - arm), at(b, b), at(b - arm, b)]);
+            line(&[at(a + arm, b), at(a, b), at(a, b - arm)]);
+            line(&[at(5.0, 5.0), at(11.0, 5.0)]);
+            line(&[at(8.0, 5.0), at(8.0, 11.5)]);
         }
         Icon::Pen => {
             // Pencil at 45°: body, tip and the ferrule line.

@@ -65,40 +65,57 @@ enum UserEvent {
     Settings(u32, SettingsMsg),
 }
 
+/// The global hotkeys and the menu items that show them.
 struct Hotkeys {
     manager: GlobalHotKeyManager,
-    active: Option<HotKey>,
+    capture_item: MenuItem,
+    text_item: MenuItem,
+    /// Registered hotkeys, `true` for the text one.
+    active: Vec<(HotKey, bool)>,
 }
 
 impl Hotkeys {
     fn pause(&mut self) {
-        if let Some(hk) = self.active.take() {
+        for (hk, _) in self.active.drain(..) {
             let _ = self.manager.unregister(hk);
         }
     }
 
-    /// (Re)register the hotkey from the config file and update its menu item.
-    fn apply_config(&mut self, capture_item: &MenuItem) {
+    /// (Re)register the hotkeys from the config file and update their menu items.
+    fn apply_config(&mut self) {
         self.pause();
-        let shortcut = config::load().hotkey;
-        let registered = hotkey::parse(&shortcut)
-            .map_err(|e| format!("invalid hotkey {shortcut:?}: {e}"))
-            .and_then(|hk| {
-                self.manager
-                    .register(hk)
-                    .map(|()| hk)
-                    .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(&shortcut)))
+        let config = config::load();
+        for (shortcut, text) in [(config.hotkey, false), (config.text_hotkey, true)] {
+            let (item, label) =
+                if text { (&self.text_item, "Extract text") } else { (&self.capture_item, "Take screenshot") };
+            if shortcut.trim().is_empty() {
+                item.set_text(label);
+                continue;
+            }
+            let registered = hotkey::parse(&shortcut)
+                .map_err(|e| format!("invalid hotkey {shortcut:?}: {e}"))
+                .and_then(|hk| {
+                    self.manager
+                        .register(hk)
+                        .map(|()| hk)
+                        .map_err(|e| format!("could not register {}: {e}", hotkey::pretty(&shortcut)))
+                });
+            item.set_text(match registered {
+                Ok(hk) => {
+                    self.active.push((hk, text));
+                    format!("{label}    {}", hotkey::pretty(&shortcut))
+                }
+                Err(e) => {
+                    eprintln!("snipno: {e}");
+                    format!("{label}    (hotkey unavailable)")
+                }
             });
-        capture_item.set_text(match registered {
-            Ok(hk) => {
-                self.active = Some(hk);
-                format!("Take screenshot    {}", hotkey::pretty(&shortcut))
-            }
-            Err(e) => {
-                eprintln!("snipno: {e}");
-                "Take screenshot    (hotkey unavailable)".to_string()
-            }
-        });
+        }
+    }
+
+    /// Which capture a hotkey event is for: `Some(true)` for text.
+    fn mode(&self, id: u32) -> Option<bool> {
+        self.active.iter().find(|(hk, _)| hk.id() == id).map(|(_, text)| *text)
     }
 }
 
@@ -234,15 +251,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
-    let mut hotkeys = Hotkeys { manager: GlobalHotKeyManager::new()?, active: None };
-    let capture_item = MenuItem::new("Take screenshot", true, None);
-    hotkeys.apply_config(&capture_item);
+    let mut hotkeys = Hotkeys {
+        manager: GlobalHotKeyManager::new()?,
+        capture_item: MenuItem::new("Take screenshot", true, None),
+        text_item: MenuItem::new("Extract text", true, None),
+        active: Vec::new(),
+    };
+    hotkeys.apply_config();
     let mut recent = Recent::new();
     let settings_item = MenuItem::new("Settings…", true, None);
     let quit_item = MenuItem::new("Quit snipno", true, None);
     let menu = Menu::new();
     menu.append_items(&[
-        &capture_item,
+        &hotkeys.capture_item,
+        &hotkeys.text_item,
         &recent.menu,
         &settings_item,
         &PredefinedMenuItem::separator(),
@@ -285,23 +307,25 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 if e.state() != HotKeyState::Pressed {
                     return;
                 }
-                if hotkeys.active.is_some_and(|hk| hk.id() == e.id()) {
-                    launch_capture(&capturing);
+                if let Some(text) = hotkeys.mode(e.id()) {
+                    launch_capture(&capturing, text);
                 }
             }
 
             Event::UserEvent(UserEvent::Menu(e)) => {
                 if recent.click(&e.id) {
                     // Handled a "Recent screenshots" item.
-                } else if e.id == *capture_item.id() {
-                    launch_capture(&capturing);
+                } else if e.id == *hotkeys.capture_item.id() {
+                    launch_capture(&capturing, false);
+                } else if e.id == *hotkeys.text_item.id() {
+                    launch_capture(&capturing, true);
                 } else if e.id == *settings_item.id() {
                     // Already open (maybe lost behind other windows)? Replace it with a fresh one
                     // in front. Settings save immediately, so nothing is lost.
                     if let Some((_, mut old)) = settings.take() {
                         let _ = old.kill();
                         let _ = old.wait();
-                        hotkeys.apply_config(&capture_item);
+                        hotkeys.apply_config();
                         recent.refresh(true);
                     }
                     generation += 1;
@@ -325,9 +349,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 match msg {
                     SettingsMsg::Pause => hotkeys.pause(),
-                    SettingsMsg::Resume => hotkeys.apply_config(&capture_item),
+                    SettingsMsg::Resume => hotkeys.apply_config(),
                     SettingsMsg::Reload => {
-                        hotkeys.apply_config(&capture_item);
+                        hotkeys.apply_config();
                         // Saving may have been switched on or off.
                         recent.refresh(true);
                     }
@@ -336,7 +360,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                             let _ = child.wait();
                         }
                         // Whatever happened in there, never leave the hotkey switched off.
-                        hotkeys.apply_config(&capture_item);
+                        hotkeys.apply_config();
                         recent.refresh(true);
                     }
                 }
@@ -369,8 +393,9 @@ fn open_settings(id: u32, proxy: EventLoopProxy<UserEvent>) -> std::io::Result<C
 /// Open an overlay on every display: one `snipno capture --monitor <id>` process each. The
 /// display under the cursor is started last so it ends up with keyboard focus. As soon as one
 /// overlay finishes (copied or cancelled: it prints [`MSG_CAPTURE_DONE`] or exits with code 0)
-/// the others are closed. The finished one is left to save its screenshot.
-fn launch_capture(capturing: &Arc<AtomicBool>) {
+/// the others are closed. The finished one is left to save its screenshot. `text`: copy the text
+/// in the selection instead (`capture --text`).
+fn launch_capture(capturing: &Arc<AtomicBool>, text: bool) {
     // Ignore the hotkey while overlays are already up.
     if capturing.swap(true, Ordering::SeqCst) {
         return;
@@ -381,6 +406,9 @@ fn launch_capture(capturing: &Arc<AtomicBool>) {
         .filter_map(|id| {
             let mut cmd = Command::new(&exe);
             cmd.arg("capture").stdout(Stdio::piped());
+            if text {
+                cmd.arg("--text");
+            }
             if let Some(id) = id {
                 cmd.args(["--monitor", &id.to_string()]);
             }

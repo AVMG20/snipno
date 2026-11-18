@@ -4,12 +4,16 @@ use std::{fs, io, path::PathBuf};
 
 /// ⌘⇧2 — next to the built-in ⌘⇧3/4/5 screenshot shortcuts, which macOS keeps for itself.
 pub const DEFAULT_HOTKEY: &str = "cmd+shift+2";
+/// ⌘⇧1 — right next to the capture shortcut.
+pub const DEFAULT_TEXT_HOTKEY: &str = "cmd+shift+1";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Config {
     /// Hotkey in `global-hotkey` string form, e.g. `cmd+shift+2`.
     pub hotkey: String,
+    /// Hotkey that selects an area and copies the text in it. Empty means none.
+    pub text_hotkey: String,
     /// Keys that pick a tool inside the capture overlay.
     pub tool_keys: ToolKeys,
     /// Keeping a copy of every capture in a folder.
@@ -20,6 +24,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.to_string(),
+            text_hotkey: DEFAULT_TEXT_HOTKEY.to_string(),
             tool_keys: ToolKeys::default(),
             save: Save::default(),
         }

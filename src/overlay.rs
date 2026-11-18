@@ -1,12 +1,15 @@
 //! `snipno capture`: freezes the screen under the cursor, shows it full-screen with a drawing
 //! toolbar on top, and copies the selected region (annotations included) to the clipboard. A
 //! copy also goes to the screenshots folder if saving is on.
+//!
+//! `snipno capture --text` is the same overlay without the drawing tools: the selected area's
+//! text is read with Vision (`src/ocr.rs`) and copied as plain text.
 
 use crate::{
     adjust::{self, Grip},
     annotate::{self, Kind, Mosaic, Shape, Tool},
     config::{self, Save},
-    hotkey, macos,
+    hotkey, macos, ocr,
     snap::{self, Snap},
     store, theme,
     toolbar::{self, Action},
@@ -28,8 +31,8 @@ use xcap::{Monitor, image::RgbaImage};
 const HINT_SECS: f32 = 3.5;
 
 /// `monitor`: display id to cover (the daemon starts one overlay per display); `None` means the
-/// display under the cursor.
-pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
+/// display under the cursor. `text`: copy the text in the selection instead of the image.
+pub fn run(monitor: Option<u32>, text: bool) -> Result<(), Box<dyn Error>> {
     let monitor = match monitor {
         Some(id) => Monitor::all()?
             .into_iter()
@@ -82,9 +85,16 @@ pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
         ..Default::default()
     };
 
-    // Saving runs off the UI thread so the overlay closes at once; the process waits for it
-    // before it exits.
+    // Saving (and reading text) runs off the UI thread so the overlay closes at once; the
+    // process waits for it before it exits.
     let jobs: Jobs = Arc::default();
+    if text && cursor.is_some() {
+        // Load Vision while you pick an area, so the read itself is quick. Only on the display
+        // you're on; one load per display at once would just compete.
+        if let Ok(mut jobs) = jobs.lock() {
+            jobs.push(std::thread::spawn(ocr::warm_up));
+        }
+    }
     let overlay_jobs = jobs.clone();
     let result = eframe::run_native(
         "snipno-capture",
@@ -101,7 +111,8 @@ pub fn run(monitor: Option<u32>) -> Result<(), Box<dyn Error>> {
                 let _ = tx.send(Snap::new(&img, img.width() as f32 / w, screen, windows));
                 ctx.request_repaint();
             });
-            Ok(Box::new(Overlay::new(&cc.egui_ctx, shot, pos2(x, y), cursor, rx, config::load(), overlay_jobs)))
+            let overlay = Overlay::new(&cc.egui_ctx, shot, pos2(x, y), cursor, rx, config::load(), overlay_jobs, text);
+            Ok(Box::new(overlay))
         }),
     );
     // Tell the daemon we're done, so it closes the other displays' overlays now rather than
@@ -162,6 +173,12 @@ struct Overlay {
     jobs: Jobs,
     /// Block-averaged screenshot for pixelate boxes, with its texture; made on first use.
     mosaic: Option<(Mosaic, TextureHandle)>,
+    /// Text capture: copy the text in the selection, no drawing tools.
+    text: bool,
+    /// The area whose text is being read, and where the result arrives.
+    reading: Option<(Rect, mpsc::Receiver<Result<String, String>>)>,
+    /// A message shown under the toolbar since the given moment, e.g. that no text was found.
+    notice: Option<(String, Instant)>,
 }
 
 struct Adjusting {
@@ -244,6 +261,23 @@ impl Hover {
     }
 }
 
+/// Darken the screen except for `sel`.
+fn dim_outside(painter: &egui::Painter, screen: Rect, sel: Option<Rect>) {
+    let dim = Color32::from_black_alpha(96);
+    let Some(sel) = sel else {
+        painter.rect_filled(screen, 0.0, dim);
+        return;
+    };
+    for r in [
+        Rect::from_min_max(screen.min, pos2(screen.max.x, sel.min.y)),
+        Rect::from_min_max(pos2(screen.min.x, sel.max.y), screen.max),
+        Rect::from_min_max(pos2(screen.min.x, sel.min.y), pos2(sel.min.x, sel.max.y)),
+        Rect::from_min_max(pos2(sel.max.x, sel.min.y), pos2(screen.max.x, sel.max.y)),
+    ] {
+        painter.rect_filled(r, 0.0, dim);
+    }
+}
+
 /// Slim dashed outline along the inside or outside edge of `r`, snapped to whole physical pixels
 /// so the dashes stay crisp on both Retina and 1x displays.
 fn dashed_outline(painter: &egui::Painter, r: Rect, kind: StrokeKind) {
@@ -295,6 +329,7 @@ struct FrameStats {
 }
 
 impl Overlay {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ctx: &egui::Context,
         shot: Arc<RgbaImage>,
@@ -303,6 +338,7 @@ impl Overlay {
         snap: mpsc::Receiver<Snap>,
         cfg: config::Config,
         jobs: Jobs,
+        text: bool,
     ) -> Self {
         let size = [shot.width() as usize, shot.height() as usize];
         let image = egui::ColorImage::from_rgba_unmultiplied(size, shot.as_raw());
@@ -346,9 +382,12 @@ impl Overlay {
                 level: 0,
                 scroll: 0.0,
             },
-            save: cfg.save.enabled.then_some(cfg.save),
+            save: (cfg.save.enabled && !text).then_some(cfg.save),
             jobs,
             mosaic: None,
+            text,
+            reading: None,
+            notice: None,
         }
     }
 
@@ -374,6 +413,10 @@ impl Overlay {
     }
 
     fn copy_and_close(&mut self, ctx: &egui::Context, selection: Rect, screen: Rect) {
+        if self.text {
+            self.start_reading(ctx, selection, screen);
+            return;
+        }
         let mosaic = self.mosaic.as_ref().map(|(m, _)| m);
         let image = annotate::render(&self.shot, &self.shapes, self.scale(screen), selection, mosaic);
         let (w, h) = image.dimensions();
@@ -398,6 +441,49 @@ impl Overlay {
             }
         }
         self.close(ctx);
+    }
+
+    /// Read the text in `selection` on a background thread; [`Self::poll_reading`] copies it.
+    fn start_reading(&mut self, ctx: &egui::Context, selection: Rect, screen: Rect) {
+        let scale = self.scale(screen);
+        let image = annotate::render(&self.shot, &[], scale, selection, None);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        // Joined before the process exits, like saves: never quit with Vision mid-run.
+        let job = std::thread::spawn(move || {
+            let _ = tx.send(ocr::read(&image, scale));
+            ctx.request_repaint();
+        });
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.push(job);
+        }
+        self.adjusting = None;
+        self.notice = None;
+        self.reading = Some((selection, rx));
+    }
+
+    /// Copy the text once it's read and close. With nothing found, say so and stay open so
+    /// you can pick another area.
+    fn poll_reading(&mut self, ctx: &egui::Context) {
+        let Some((_, rx)) = &self.reading else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("text recognition stopped".into()),
+        };
+        self.reading = None;
+        let message = match result {
+            Ok(text) if !text.trim().is_empty() => {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                    Ok(()) => return self.close(ctx),
+                    Err(e) => format!("Copying failed: {e}  ·"),
+                }
+            }
+            Ok(_) => "No text found there. Select another area  ·".to_string(),
+            Err(e) => format!("Couldn't read the text: {e}  ·"),
+        };
+        eprintln!("snipno: {}", message.trim_end_matches(" ·").trim());
+        self.notice = Some((message, Instant::now()));
     }
 
     fn close(&mut self, ctx: &egui::Context) {
@@ -440,7 +526,9 @@ impl Overlay {
                 self.shapes.pop();
             }
             self.preview = None;
-        } else if let Some(t) = tool {
+        } else if let Some(t) = tool
+            && !self.text
+        {
             self.tool = t;
         }
     }
@@ -565,24 +653,9 @@ impl Overlay {
         painter.image(self.texture.id(), screen, uv, Color32::WHITE);
 
         // Dim everything except the area being selected (or the hover highlight).
-        let dim = Color32::from_black_alpha(96);
         let hover = self.highlight();
         let held = self.adjusting.as_ref().map(|a| a.rect);
-        match self.selecting.map(|(a, b)| Rect::from_two_pos(a, b)).or(held).or(hover) {
-            Some(sel) => {
-                for r in [
-                    Rect::from_min_max(screen.min, pos2(screen.max.x, sel.min.y)),
-                    Rect::from_min_max(pos2(screen.min.x, sel.max.y), screen.max),
-                    Rect::from_min_max(pos2(screen.min.x, sel.min.y), pos2(sel.min.x, sel.max.y)),
-                    Rect::from_min_max(pos2(sel.max.x, sel.min.y), pos2(screen.max.x, sel.max.y)),
-                ] {
-                    painter.rect_filled(r, 0.0, dim);
-                }
-            }
-            None => {
-                painter.rect_filled(screen, 0.0, dim);
-            }
-        }
+        dim_outside(painter, screen, self.selecting.map(|(a, b)| Rect::from_two_pos(a, b)).or(held).or(hover));
 
         // Pixelate boxes first so drawings on top stay sharp, the same order as the copy.
         let shapes = || self.shapes.iter().chain(self.preview.as_ref().or(self.drawing.as_ref()));
@@ -767,6 +840,24 @@ impl eframe::App for Overlay {
             ctx.request_repaint();
         }
 
+        self.poll_reading(&ctx);
+        if self.closing {
+            return;
+        }
+        if let Some((area, _)) = &self.reading {
+            // Waiting for the text: show the area being read, only Esc does anything.
+            let area = *area;
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                return self.close(&ctx);
+            }
+            let painter = ui.painter();
+            painter.image(self.texture.id(), screen, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            dim_outside(painter, screen, Some(area));
+            dashed_outline(painter, area, StrokeKind::Outside);
+            toolbar::hint(&ctx, "Reading text…  ·", "Esc", 1.0);
+            return;
+        }
+
         self.handle_keys(&ctx, screen);
         if self.tool == Tool::Pixelate {
             // Build the mosaic as soon as the tool is picked, not on the first drag.
@@ -793,7 +884,8 @@ impl eframe::App for Overlay {
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         self.paint(ui.painter(), screen, pointer);
         if self.adjusting.is_some() {
-            toolbar::hint(&ctx, "Release ⌘ to copy  ·  drag to move or resize  ·", "⌘Z", 1.0);
+            let release = if self.text { "Release ⌘ to copy the text" } else { "Release ⌘ to copy" };
+            toolbar::hint(&ctx, &format!("{release}  ·  drag to move or resize  ·"), "⌘Z", 1.0);
             return;
         }
         if self.selecting.is_some() || self.drawing.is_some() {
@@ -808,6 +900,7 @@ impl eframe::App for Overlay {
                 width: &mut self.width,
                 can_undo: !self.shapes.is_empty(),
                 keys: &self.tool_keys,
+                text: self.text,
             },
         );
         match action {
@@ -819,9 +912,13 @@ impl eframe::App for Overlay {
             None => {}
         }
 
-        let age = self.opened.elapsed().as_secs_f32();
+        // A notice (no text found) replaces the usual hint and fades the same way.
+        let since = self.notice.as_ref().map_or(self.opened, |(_, at)| *at);
+        let age = since.elapsed().as_secs_f32();
         let opacity = (1.0 - (age - HINT_SECS) / 0.4).clamp(0.0, 1.0);
         let text = match self.tool {
+            _ if self.notice.is_some() => self.notice.as_ref().map(|(m, _)| m.clone()).unwrap_or_default(),
+            _ if self.text => "Click to copy the text in the highlight, drag for your own, scroll to resize  ·".to_string(),
             Tool::Select => "Click to capture the highlight, drag for your own, scroll to resize  ·".to_string(),
             tool => {
                 let what = match tool {

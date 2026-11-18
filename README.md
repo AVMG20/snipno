@@ -33,7 +33,15 @@ During development, `cargo run` starts the daemon from your terminal. In that ca
 | `↩` / **Full screen** | copy the whole screen |
 | `Esc` | drop a selection held open, otherwise cancel |
 
-To change the capture hotkey or the tool keys, click the menu bar icon → **Settings…**. A new capture hotkey works as soon as you've recorded it. Any key combination is allowed, including Insert and a Windows keyboard's PrtSc (which reaches a Mac as F13). Config is stored in `~/Library/Application Support/snipno/config.json`.
+## Extract text
+
+Press **⇧⌘1** (or **Extract text** in the menu bar menu) and select an area the same way: hover and click, drag, or press `↩` for the whole screen. The text in it is copied as plain text, nothing is saved. If there's no text there, the overlay says so and stays open.
+
+It uses macOS's own text recognition (Vision, the engine behind Live Text), so it works offline and adds nothing to the app's size. English and Dutch are preferred; numbers, codes, email addresses and symbols come through as they are. Lines are kept, and a blank line marks a paragraph break. Large areas, up to the whole screen, are read in pieces cut between columns, lines and words. Vision shrinks big images before reading them, so small text in a wide area would otherwise come back as garbage. A screen full of dense text can take a few seconds. `snipno ocr <image.png>` prints the text in an image file, handy for testing.
+
+## Settings
+
+To change the capture or extract-text hotkey or the tool keys, click the menu bar icon → **Settings…**. A new hotkey works as soon as you've recorded it. Any key combination is allowed, including Insert and a Windows keyboard's PrtSc (which reaches a Mac as F13). Config is stored in `~/Library/Application Support/snipno/config.json`.
 
 ## Saved screenshots
 
@@ -49,7 +57,7 @@ Every capture is also saved as a PNG, by default in `~/Pictures/snipno`. The las
 One binary, three modes:
 
 - `snipno` (daemon, `src/daemon.rs`): runs a tao event loop with the menu bar icon (`tray-icon`) and the global hotkey (`global-hotkey`). It runs the other two modes as child processes.
-- `snipno capture [--monitor <id>]` (`src/overlay.rs`): the daemon starts one per display (`snipno monitors` lists the ids). The display under the cursor starts last, so it gets keyboard focus. When one overlay copies or cancels, the daemon closes the rest. Each overlay captures its own display with `xcap` before its own window exists. It then shows that image in a borderless eframe window raised above the menu bar (`src/macos.rs`).
+- `snipno capture [--monitor <id>] [--text]` (`src/overlay.rs`): the daemon starts one per display (`snipno monitors` lists the ids). The display under the cursor starts last, so it gets keyboard focus. When one overlay copies or cancels, the daemon closes the rest. Each overlay captures its own display with `xcap` before its own window exists. It then shows that image in a borderless eframe window raised above the menu bar (`src/macos.rs`). With `--text` the drawing tools are hidden and the selection is read with Vision (`src/ocr.rs`) instead of copied as an image.
 - `snipno settings` (`src/settings.rs`): records the capture hotkey and the tool keys, and sets up saving. It reports back to the daemon over stdout: while it records, the daemon pauses the global hotkey, and after a save the daemon reloads the config.
 
 Smart selection (`src/snap.rs`) combines the window list with long straight edges found in the screenshot, so hovering highlights panels and cards as well as whole windows. It deliberately ignores small controls such as buttons and text fields, since you usually want the block around them.
